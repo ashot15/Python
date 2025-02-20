@@ -1,0 +1,341 @@
+import argparse
+import json
+import sys
+import time
+import hmac
+import hashlib
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, Dict, List, Optional, Callable, Union
+import unittest
+import logging
+import asyncio
+import aiohttp
+from aiohttp import web
+import jwt
+from datetime import datetime, timedelta
+import threading
+import queue
+import ssl
+import os
+from functools import wraps
+
+import requests
+from requests.exceptions import RequestException
+from flask import Flask, Blueprint, request
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Классы библиотеки ---
+
+class WebHookSender:
+    """Класс для отправки вебхуков с расширенными возможностями."""
+    def __init__(self, url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 10,
+                 rate_limit: int = 100, rate_period: int = 60, async_mode: bool = False):
+        self.url = url
+        self.headers = headers or {}
+        self.timeout = timeout
+        self.rate_limit = rate_limit
+        self.rate_period = rate_period
+        self.request_count = 0
+        self.last_reset = time.time()
+        self.async_mode = async_mode
+        self.queue = queue.Queue() if async_mode else None
+        if async_mode:
+            threading.Thread(target=self._async_worker, daemon=True).start()
+
+    def _check_rate_limit(self):
+        current_time = time.time()
+        if current_time - self.last_reset >= self.rate_period:
+            self.request_count = 0
+            self.last_reset = current_time
+        if self.request_count >= self.rate_limit:
+            delay = self.rate_period - (current_time - self.last_reset)
+            time.sleep(delay)
+            self.request_count = 0
+            self.last_reset = time.time()
+        self.request_count += 1
+
+    async def _async_send(self, data, method, data_format, max_retries, retry_delay):
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(max_retries):
+                try:
+                    if data_format == 'json':
+                        response = await session.request(method, self.url, json=data, headers=self.headers, timeout=aiohttp.ClientTimeout(total=self.timeout))
+                    elif data_format == 'form':
+                        response = await session.request(method, self.url, data=data, headers=self.headers, timeout=aiohttp.ClientTimeout(total=self.timeout))
+                    else:
+                        raise ValueError(f"Unsupported data format: {data_format}")
+                    response.raise_for_status()
+                    return response
+                except (aiohttp.ClientError, ValueError) as e:
+                    if attempt == max_retries - 1:
+                        logging.error(f"Async send failed: {e}")
+                        raise e
+                    await asyncio.sleep(retry_delay)
+            return None
+
+    def _async_worker(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        while True:
+            data, method, data_format, max_retries, retry_delay = self.queue.get()
+            try:
+                loop.run_until_complete(self._async_send(data, method, data_format, max_retries, retry_delay))
+            except Exception as e:
+                logging.error(f"Async worker error: {e}")
+            self.queue.task_done()
+
+    def send(self, data: Dict[str, Any], method: str = 'POST', data_format: str = 'json',
+             max_retries: int = 3, retry_delay: int = 1, priority: int = 0) -> Optional[requests.Response]:
+        if self.async_mode:
+            self.queue.put((data, method, data_format, max_retries, retry_delay), priority)
+            return None
+        self._check_rate_limit()
+        for attempt in range(max_retries):
+            try:
+                if data_format == 'json':
+                    response = requests.request(method, self.url, json=data, headers=self.headers, timeout=self.timeout)
+                elif data_format == 'form':
+                    response = requests.request(method, self.url, data=data, headers=self.headers, timeout=self.timeout)
+                else:
+                    raise ValueError(f"Unsupported data format: {data_format}")
+                response.raise_for_status()
+                logging.info(f"Webhook sent to {self.url}, status: {response.status_code}")
+                return response
+            except RequestException as e:
+                if attempt == max_retries - 1:
+                    logging.error(f"Failed to send webhook after {max_retries} attempts: {e}")
+                    raise e
+                time.sleep(retry_delay)
+        return None
+
+    def batch_send(self, data_list: List[Dict[str, Any]], method: str = 'POST', data_format: str = 'json',
+                   max_retries: int = 3, retry_delay: int = 1):
+        for data in data_list:
+            self.send(data, method, data_format, max_retries, retry_delay)
+
+
+class WebHookReceiver:
+    """Базовый класс для получения вебхуков с расширенной валидацией и обработкой."""
+    def __init__(self, secret_key: str, allowed_ips: Optional[List[str]] = None,
+                 callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 max_payload_size: int = 1024 * 1024):
+        self.secret_key = secret_key
+        self.allowed_ips = allowed_ips or []
+        self.callback = callback
+        self.max_payload_size = max_payload_size
+
+    def verify_signature(self, request) -> bool:
+        raise NotImplementedError
+
+    def verify_ip(self, request) -> bool:
+        client_ip = request.remote_addr if hasattr(request, 'remote_addr') else request.client_ip
+        return not self.allowed_ips or client_ip in self.allowed_ips
+
+    def handle(self, request) -> tuple[str, int]:
+        content_length = int(request.headers.get('Content-Length', 0))
+        if content_length > self.max_payload_size:
+            return 'Payload too large', 413
+        if not self.verify_ip(request):
+            return 'Forbidden IP', 403
+        if not self.verify_signature(request):
+            return 'Invalid signature', 403
+        data = request.json()
+        if self.callback:
+            threading.Thread(target=self.callback, args=(data,), daemon=True).start()
+        logging.info(f"Webhook received: {data}")
+        return f"Received: {json.dumps(data)}", 200
+
+
+class GitHubWebHookReceiver(WebHookReceiver):
+    """Класс для получения вебхуков от GitHub."""
+    def verify_signature(self, request) -> bool:
+        signature_header = request.headers.get('X-Hub-Signature-256')
+        if not signature_header:
+            return False
+        signature, expected_hash = signature_header.split('=')
+        if signature != 'sha256':
+            return False
+        request_body = request.data
+        computed_hash = hmac.new(self.secret_key.encode(), request_body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(computed_hash, expected_hash)
+
+
+class SlackWebHookReceiver(WebHookReceiver):
+    """Класс для получения вебхуков от Slack."""
+    def verify_signature(self, request) -> bool:
+        timestamp = request.headers.get('X-Slack-Request-Timestamp')
+        signature = request.headers.get('X-Slack-Signature')
+        if not timestamp or not signature:
+            return False
+        if abs(time.time() - float(timestamp)) > 60 * 5:
+            return False
+        sig_basestring = f"v0:{timestamp}:{request.data.decode()}"
+        computed_hash = hmac.new(self.secret_key.encode(), sig_basestring.encode(), hashlib.sha256).hexdigest()
+        expected_hash = signature.split('=')[1]
+        return hmac.compare_digest(f'v0={computed_hash}', signature)
+
+
+class StripeWebHookReceiver(WebHookReceiver):
+    """Класс для получения вебхуков от Stripe."""
+    def verify_signature(self, request) -> bool:
+        signature_header = request.headers.get('Stripe-Signature')
+        if not signature_header:
+            return False
+        params = dict(p.split('=') for p in signature_header.split(','))
+        timestamp = params.get('t')
+        signature = params.get('v1')
+        if not timestamp or not signature:
+            return False
+        if abs(time.time() - float(timestamp)) > 30:
+            return False
+        sig_basestring = f"{timestamp}.{request.data.decode()}"
+        computed_hash = hmac.new(self.secret_key.encode(), sig_basestring.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(computed_hash, signature)
+
+
+def flask_blueprint(receiver: WebHookReceiver, path: str) -> Blueprint:
+    bp = Blueprint('webhook', __name__)
+    @bp.route(path, methods=['POST'])
+    def handle_webhook():
+        response_data, status_code = receiver.handle(request)
+        return response_data, status_code
+    return bp
+
+
+def jwt_authenticate(secret_key: str, expires_in: int = 3600):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            token = jwt.encode({'exp': datetime.utcnow() + timedelta(seconds=expires_in)}, secret_key, algorithm='HS256')
+            original_headers = self.headers.copy()
+            self.headers['Authorization'] = f"Bearer {token}"
+            result = func(self, *args, **kwargs)
+            self.headers = original_headers
+            return result
+        return wrapper
+    return decorator
+
+
+# --- CLI и сервер для тестирования ---
+
+def run_test_server(port: int, secret_key: str, service: str = 'generic', use_ssl: bool = False):
+    if service == 'github':
+        receiver = GitHubWebHookReceiver(secret_key)
+    elif service == 'slack':
+        receiver = SlackWebHookReceiver(secret_key)
+    elif service == 'stripe':
+        receiver = StripeWebHookReceiver(secret_key)
+    else:
+        receiver = WebHookReceiver(secret_key)
+
+    class RequestHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode()
+            class MockRequest:
+                def __init__(self, headers, data, client_ip):
+                    self.headers = headers
+                    self.data = body.encode()
+                    self.client_ip = client_ip
+                    self.json = lambda: json.loads(body) if body else {}
+            req = MockRequest(self.headers, body, self.client_address[0])
+            response_data, status_code = receiver.handle(req)
+            self.send_response(status_code)
+            self.end_headers()
+            self.wfile.write(response_data.encode())
+
+    server = HTTPServer(('localhost', port), RequestHandler)
+    if use_ssl:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile='cert.pem', keyfile='key.pem')
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    print(f"Starting server on port {port} for {service} webhooks (SSL: {use_ssl})...")
+    server.serve_forever()
+
+
+def cli_main():
+    parser = argparse.ArgumentParser(prog='webhooker', description='WebHooker CLI')
+    subparsers = parser.add_subparsers(dest='command')
+
+    send_parser = subparsers.add_parser('send', help='Send a Webhook')
+    send_parser.add_argument('url', help='URL to send the request to')
+    send_parser.add_argument('data_file', help='File containing the data to send')
+    send_parser.add_argument('-m', '--method', default='POST', help='HTTP method (default: POST)')
+    send_parser.add_argument('-f', '--format', default='json', help='Data format (json or form, default: json)')
+    send_parser.add_argument('-r', '--retries', type=int, default=3, help='Number of retries (default: 3)')
+    send_parser.add_argument('-d', '--delay', type=int, default=1, help='Delay between retries in seconds (default: 1)')
+    send_parser.add_argument('-t', '--timeout', type=int, default=10, help='Request timeout in seconds (default: 10)')
+    send_parser.add_argument('--async-mode', action='store_true', help='Send asynchronously')  # Изменено с --async
+
+    receive_parser = subparsers.add_parser('receive', help='Receive a Webhook')
+    receive_parser.add_argument('port', type=int, help='Port to listen on')
+    receive_parser.add_argument('-s', '--service', default='generic', help='Service type (generic, github, slack, stripe)')
+    receive_parser.add_argument('-k', '--secret', required=True, help='Secret key for verification')
+    receive_parser.add_argument('--ssl', action='store_true', help='Use SSL (requires cert.pem and key.pem)')
+
+    args = parser.parse_args()
+
+    if args.command == 'send':
+        with open(args.data_file, 'r') as f:
+            if args.format == 'json':
+                data = json.load(f)
+            elif args.format == 'form':
+                data = json.load(f)
+            else:
+                print("Unsupported format")
+                sys.exit(1)
+        sender = WebHookSender(args.url, timeout=args.timeout, async_mode=args.async_mode)  # Исправлено
+        try:
+            response = sender.send(data, method=args.method, data_format=args.format, max_retries=args.retries, retry_delay=args.delay)
+            if response:
+                print(f"Response status: {response.status_code}")
+                print(response.text)
+        except RequestException as e:
+            print(f"Error: {e}")
+    elif args.command == 'receive':
+        run_test_server(args.port, args.secret, args.service, args.ssl)
+
+
+# --- Тесты ---
+
+class TestWebHooker(unittest.TestCase):
+    def test_sender_success(self):
+        sender = WebHookSender('https://httpbin.org/post')
+        response = sender.send({'test': 'data'})
+        self.assertEqual(response.status_code, 200)
+
+    def test_sender_invalid_format(self):
+        sender = WebHookSender('https://httpbin.org/post')
+        with self.assertRaises(ValueError):
+            sender.send({'test': 'data'}, data_format='invalid')
+
+    def test_github_receiver_signature(self):
+        receiver = GitHubWebHookReceiver('secret')
+        class MockRequest:
+            headers = {'X-Hub-Signature-256': 'sha256=incorrect'}
+            data = b'test data'
+            client_ip = '127.0.0.1'
+            def json(self):
+                return {'test': 'data'}
+        self.assertFalse(receiver.verify_signature(MockRequest()))
+
+# --- Основной код для запуска ---
+
+if __name__ == '__main__':
+    # Запуск тестов
+    unittest.main(argv=['first-arg-is-ignored'], exit=False)
+
+    # Пример использования: отправка вебхука
+    sender = WebHookSender('https://httpbin.org/post', async_mode=True)
+    sender.send({'message': 'Async Hello from WebHooker!'})
+    print("Sent async webhook")
+
+    # Пример использования: Flask-приложение для получения вебхуков
+    app = Flask(__name__)
+    receiver = SlackWebHookReceiver('my_slack_secret')
+    bp = flask_blueprint(receiver, '/slack-webhook')
+    app.register_blueprint(bp)
+    print("Starting Flask app on http://127.0.0.1:5000/slack-webhook")
+    app.run(debug=True)
