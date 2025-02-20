@@ -1,0 +1,373 @@
+import csv
+from typing import Iterator, Dict, Any, Optional, Union, List
+from abc import ABC, abstractmethod
+from datetime import datetime
+from collections import defaultdict
+import statistics
+import sqlite3
+import unittest
+import os
+import logging
+import json
+from dateutil import parser as date_parser
+import re
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
+try:
+    import mysql.connector
+except ImportError:
+    mysql.connector = None
+
+# --- Классы библиотеки ---
+
+class CSVReader:
+    """Класс для чтения CSV-файлов с поддержкой диалектов и автоматическим определением типов данных."""
+    def __init__(self, file_path: str, dialect: Optional[Union[str, csv.Dialect]] = None, encoding: str = 'utf-8'):
+        self.file_path = file_path
+        self.dialect = dialect if dialect else csv.excel
+        self.encoding = encoding
+        self.headers = None
+        self.types = None
+        self._initialize()
+
+    def _initialize(self):
+        """Инициализация заголовков и типов данных на основе первых строк."""
+        with open(self.file_path, 'r', encoding=self.encoding) as file:
+            reader = csv.DictReader(file, dialect=self.dialect)
+            self.headers = reader.fieldnames
+            sample_rows = []
+            for i, row in enumerate(reader):
+                if i < 10:  # Собираем до 10 строк для анализа типов
+                    sample_rows.append(row)
+                else:
+                    break
+            self.types = self._detect_types(sample_rows)
+            logging.info(f"Определены типы данных: {self.types}")
+
+    def _detect_types(self, rows: List[Dict[str, str]]) -> Dict[str, callable]:
+        types = {}
+        for key in self.headers:
+            values = [row[key] for row in rows if key in row and row[key]]
+            types[key] = self._get_type(values)
+        return types
+
+    def _get_type(self, values: List[str]) -> callable:
+        for value in values:
+            try:
+                int(value)
+                return int
+            except ValueError:
+                try:
+                    float(value)
+                    return float
+                except ValueError:
+                    if value.lower() in ('true', 'false'):
+                        return lambda x: x.lower() == 'true'
+                    try:
+                        date_parser.parse(value)
+                        return lambda x: date_parser.parse(x)
+                    except ValueError:
+                        try:
+                            json.loads(value)
+                            return json.loads
+                        except json.JSONDecodeError:
+                            pass
+        return str
+
+    def _cast_row(self, row: Dict[str, str]) -> Dict[str, Any]:
+        return {key: self.types[key](row[key]) if row[key] else None for key in self.headers}
+
+    def __iter__(self) -> Iterator[Dict[str, Any]]:
+        with open(self.file_path, 'r', encoding=self.encoding) as file:
+            reader = csv.DictReader(file, dialect=self.dialect)
+            next(reader)  # Пропускаем заголовок
+            for row in reader:
+                yield self._cast_row(row)
+
+
+class CSVWriter:
+    """Класс для записи данных в CSV-файл с поддержкой диалектов."""
+    def __init__(self, file_path: str, headers: List[str], dialect: Optional[Union[str, csv.Dialect]] = None, encoding: str = 'utf-8'):
+        self.file_path = file_path
+        self.headers = headers
+        self.dialect = dialect if dialect else csv.excel
+        self.encoding = encoding
+
+    def write(self, data: Iterator[Dict[str, Any]]):
+        with open(self.file_path, 'w', encoding=self.encoding, newline='') as file:
+            writer = csv.DictWriter(file, fieldnames=self.headers, dialect=self.dialect)
+            writer.writeheader()
+            writer.writerows(data)
+            logging.info(f"Данные записаны в {self.file_path}")
+
+
+class DatabaseAdapter(ABC):
+    """Абстрактный класс для интеграции с базами данных."""
+    @abstractmethod
+    def connect(self):
+        pass
+
+    @abstractmethod
+    def insert(self, table: str, data: Iterator[Dict[str, Any]]):
+        pass
+
+    @abstractmethod
+    def close(self):
+        pass
+
+
+class SQLiteAdapter(DatabaseAdapter):
+    """Адаптер для SQLite."""
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.connection = None
+
+    def connect(self):
+        self.connection = sqlite3.connect(self.db_path)
+        self.connection.execute("PRAGMA foreign_keys = ON;")
+        logging.info(f"Подключение к SQLite: {self.db_path}")
+
+    def insert(self, table: str, data: Iterator[Dict[str, Any]]):
+        cursor = self.connection.cursor()
+        for row in data:
+            columns = ', '.join(row.keys())
+            placeholders = ', '.join('?' * len(row))
+            values = tuple(
+                json.dumps(v) if isinstance(v, (list, dict)) else
+                v.isoformat() if isinstance(v, datetime) else v
+                for v in row.values()
+            )
+            cursor.execute(f'INSERT INTO {table} ({columns}) VALUES ({placeholders})', values)
+        self.connection.commit()
+        logging.info(f"Данные вставлены в таблицу {table}")
+
+    def close(self):
+        if self.connection:
+            self.connection.close()
+            logging.info("Соединение с SQLite закрыто")
+
+
+class PostgreSQLAdapter(DatabaseAdapter):
+    """Адаптер для PostgreSQL. Требуется установка psycopg2."""
+    def __init__(self, host: str, database: str, user: str, password: str):
+        if not psycopg2:
+            raise ImportError("psycopg2 is required for PostgreSQL support. Install it with 'pip install psycopg2'.")
+        self.host = host
+        self.database = database
+        self.user = user
+        self.password = password
+        self.connection = None
+
+    def connect(self):
+        self.connection = psycopg2.connect(
+            host=self.host, database=self.database, user=self.user, password=self.password
+        )
+        logging.info(f"Подключение к PostgreSQL: {self.database}")
+
+    def insert(self, table: str, data: Iterator[Dict[str, Any]]):
+        cursor = self.connection.cursor()
+        for row in data:
+            columns = ', '.join(row.keys())
+            placeholders = ', '.join('%s' * len(row))
+            values = tuple(
+                json.dumps(v) if isinstance(v, (list, dict)) else
+                v.isoformat() if isinstance(v, datetime) else v
+                for v in row.values()
+            )
+            cursor.execute(f'INSERT INTO {table} ({columns}) VALUES ({placeholders})', values)
+        self.connection.commit()
+        logging.info(f"Данные вставлены в таблицу {table}")
+
+    def close(self):
+        if self.connection:
+            self.connection.close()
+            logging.info("Соединение с PostgreSQL закрыто")
+
+
+class MySQLAdapter(DatabaseAdapter):
+    """Адаптер для MySQL. Требуется установка mysql-connector-python."""
+    def __init__(self, host: str, database: str, user: str, password: str):
+        if not mysql.connector:
+            raise ImportError("mysql-connector-python is required for MySQL support. Install it with 'pip install mysql-connector-python'.")
+        self.host = host
+        self.database = database
+        self.user = user
+        self.password = password
+        self.connection = None
+
+    def connect(self):
+        self.connection = mysql.connector.connect(
+            host=self.host, database=self.database, user=self.user, password=self.password
+        )
+        logging.info(f"Подключение к MySQL: {self.database}")
+
+    def insert(self, table: str, data: Iterator[Dict[str, Any]]):
+        cursor = self.connection.cursor()
+        for row in data:
+            columns = ', '.join(row.keys())
+            placeholders = ', '.join('%s' * len(row))
+            values = tuple(
+                json.dumps(v) if isinstance(v, (list, dict)) else
+                v.isoformat() if isinstance(v, datetime) else v
+                for v in row.values()
+            )
+            cursor.execute(f'INSERT INTO {table} ({columns}) VALUES ({placeholders})', values)
+        self.connection.commit()
+        logging.info(f"Данные вставлены в таблицу {table}")
+
+    def close(self):
+        if self.connection:
+            self.connection.close()
+            logging.info("Соединение с MySQL закрыто")
+
+
+class Aggregator:
+    """Класс для агрегации данных."""
+    def __init__(self):
+        self.data = defaultdict(list)
+
+    def aggregate(self, data: Iterator[Dict[str, Any]], columns: List[str]):
+        for row in data:
+            for col in columns:
+                if col in row and row[col] is not None:
+                    self.data[col].append(row[col])
+        logging.info(f"Агрегация выполнена для столбцов: {columns}")
+
+    def sum(self, column: str) -> float:
+        return sum(self.data[column])
+
+    def mean(self, column: str) -> float:
+        return statistics.mean(self.data[column])
+
+    def min(self, column: str) -> Any:
+        return min(self.data[column])
+
+    def max(self, column: str) -> Any:
+        return max(self.data[column])
+
+    def count(self, column: str) -> int:
+        return len(self.data[column])
+
+
+class Validator:
+    """Класс для валидации данных по заданной схеме."""
+    def __init__(self, schema: Dict[str, Dict[str, Any]]):
+        self.schema = schema
+        self.unique_values = defaultdict(set)
+
+    def validate(self, data: Iterator[Dict[str, Any]]) -> List[str]:
+        errors = []
+        for i, row in enumerate(data):
+            for col, rules in self.schema.items():
+                value = row.get(col)
+                if 'type' in rules and value is not None and not isinstance(value, rules['type']):
+                    errors.append(f"Row {i}: {col} should be {rules['type'].__name__}, got {type(value).__name__}")
+                if 'min' in rules and value is not None and value < rules['min']:
+                    errors.append(f"Row {i}: {col} should be >= {rules['min']}, got {value}")
+                if 'max' in rules and value is not None and value > rules['max']:
+                    errors.append(f"Row {i}: {col} should be <= {rules['max']}, got {value}")
+                if 'regex' in rules and value is not None and isinstance(value, str):
+                    if not re.match(rules['regex'], value):
+                        errors.append(f"Row {i}: {col} does not match regex {rules['regex']}")
+                if 'unique' in rules and rules['unique'] and value is not None:
+                    if value in self.unique_values[col]:
+                        errors.append(f"Row {i}: {col} should be unique, duplicate found: {value}")
+                    else:
+                        self.unique_values[col].add(value)
+        logging.info(f"Валидация завершена, найдено ошибок: {len(errors)}")
+        return errors
+
+
+# --- Тесты ---
+
+class TestCSVMaster(unittest.TestCase):
+    def setUp(self):
+        with open('test.csv', 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['name', 'age', 'is_active', 'birth_date', 'tags'])
+            writer.writerow(['Alice', '25', 'true', '1990-01-01', '["tag1", "tag2"]'])
+            writer.writerow(['Bob', '35', 'false', '1985-05-05', '["tag3"]'])
+
+    def test_csv_reader(self):
+        reader = CSVReader('test.csv')
+        data = list(reader)
+        self.assertEqual(len(data), 2)
+        self.assertEqual(data[0]['name'], 'Alice')
+        self.assertEqual(data[0]['age'], 25)
+        self.assertEqual(data[0]['is_active'], True)
+        self.assertIsInstance(data[0]['birth_date'], datetime)
+        self.assertListEqual(data[0]['tags'], ['tag1', 'tag2'])
+
+    def test_aggregator(self):
+        reader = CSVReader('test.csv')
+        agg = Aggregator()
+        agg.aggregate(reader, ['age'])
+        self.assertEqual(agg.sum('age'), 60)
+        self.assertEqual(agg.mean('age'), 30)
+
+    def test_validator(self):
+        reader = CSVReader('test.csv')
+        schema = {
+            'age': {'type': int, 'min': 0, 'max': 120},
+            'name': {'type': str, 'regex': r'^[A-Za-z]+$'}
+        }
+        validator = Validator(schema)
+        errors = validator.validate(reader)
+        self.assertEqual(len(errors), 0)
+
+    def tearDown(self):
+        os.remove('test.csv')
+
+
+# --- Тестовая задача ---
+
+if __name__ == '__main__':
+    # Запуск тестов
+    unittest.main(argv=['first-arg-is-ignored'], exit=False)
+
+    # Создание тестового CSV
+    with open('example.csv', 'w', encoding='utf-8', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['name', 'age', 'is_active', 'birth_date', 'tags'])
+        writer.writerow(['Alice', '25', 'true', '1990-01-01', '["tag1", "tag2"]'])
+        writer.writerow(['Bob', '35', 'false', '1985-05-05', '["tag3"]'])
+
+    # Чтение данных
+    reader = CSVReader('example.csv')
+    data = list(reader)
+    print("Данные из CSV:", data)
+
+    # Агрегация
+    agg = Aggregator()
+    agg.aggregate(data, ['age'])
+    print("Сумма возрастов:", agg.sum('age'))
+    print("Средний возраст:", agg.mean('age'))
+
+    # Валидация
+    schema = {
+        'age': {'type': int, 'min': 0, 'max': 120},
+        'name': {'type': str, 'regex': r'^[A-Za-z]+$', 'unique': True}
+    }
+    validator = Validator(schema)
+    errors = validator.validate(data)
+    print("Ошибки валидации:", errors)
+
+    # Запись в базу данных SQLite
+    adapter = SQLiteAdapter('example.db')
+    adapter.connect()
+    cursor = adapter.connection.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users
+                      (name TEXT, age INTEGER, is_active INTEGER, birth_date TEXT, tags TEXT)''')
+    adapter.insert('users', data)
+    adapter.close()
+
+    # Очистка
+    os.remove('example.csv')
+    os.remove('example.db')
