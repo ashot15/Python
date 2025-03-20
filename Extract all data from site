@@ -3,41 +3,66 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 import re
 import os
 import logging
+from logging.handlers import RotatingFileHandler
 import hashlib
 from urllib.parse import urljoin, urlparse
 import aiohttp
 import asyncio
 import nest_asyncio
 from datetime import datetime
+import time
+from concurrent.futures import ThreadPoolExecutor
+from PIL import Image
+from io import BytesIO
+import av
 
-# Для работы с асинхронными запросами
 nest_asyncio.apply()
+
+# Кастомный форматтер для логов
+class CustomFormatter(logging.Formatter):
+    def format(self, record):
+        if not hasattr(record, 'url'):
+            record.url = ''
+        return super().format(record)
 
 # Настройка логирования
 def setup_logging():
     log_dir = "output/logs"
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "extraction.log")
-    logging.basicConfig(
-        filename=log_file,
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        encoding="utf-8"
-    )
-    logging.info("Начало процесса извлечения ресурсов")
 
-# Создание структуры папок
-def create_directories():
+    handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
+    formatter = CustomFormatter("%(asctime)s - %(levelname)s - [%(url)s] - %(message)s")
+    handler.setFormatter(formatter)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+
+    logger = logging.getLogger('roblox_crawler')
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    logger.addHandler(console_handler)
+
+    logger.info("Начало процесса извлечения ресурсов")
+    return logger
+
+# Создание структуры папок с логичным именованием
+def create_directories(section):
     base_dir = "output"
     directories = [
-        f"{base_dir}/html/main",
-        f"{base_dir}/html/meta",
-        f"{base_dir}/html/head",
-        f"{base_dir}/html/body",
+        f"{base_dir}/html/{section}/main",
+        f"{base_dir}/html/{section}/meta",
+        f"{base_dir}/html/{section}/head",
+        f"{base_dir}/html/{section}/body",
+        f"{base_dir}/html/{section}/title",
+        f"{base_dir}/html/{section}/header",
+        f"{base_dir}/html/{section}/main_content",
+        f"{base_dir}/html/{section}/footer",
         f"{base_dir}/css/inline",
         f"{base_dir}/css/external",
         f"{base_dir}/js/inline",
@@ -48,82 +73,185 @@ def create_directories():
         f"{base_dir}/audio",
         f"{base_dir}/iframes",
         f"{base_dir}/favicon",
+        f"{base_dir}/logs",
     ]
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
 
-# Генерация уникального имени файла на основе URL
+# Генерация уникального имени файла
 def generate_filename(url, extension, prefix=""):
     parsed_url = urlparse(url)
     path = parsed_url.path
     filename = os.path.basename(path)
     if not filename:
         filename = hashlib.md5(url.encode('utf-8')).hexdigest()
-    filename = re.sub(r'[^\w\-_\.]', '_', filename)
+    filename = re.sub(r'[^\w\-_\.]', '_', filename)[:100]
     if not filename.endswith(f".{extension}"):
         filename = f"{filename}.{extension}"
+    base_filename = filename
+    counter = 1
+    while os.path.exists(os.path.join(prefix, filename)):
+        filename = f"{base_filename.rsplit('.', 1)[0]}_{counter}.{extension}"
+        counter += 1
     return f"{prefix}{filename}" if prefix else filename
 
-# Настройка Selenium для рендеринга динамического контента
+# Настройка Selenium
 def setup_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    return driver
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.set_page_load_timeout(30)
+        return driver
+    except Exception as e:
+        logging.getLogger('roblox_crawler').error(f"Ошибка при запуске ChromeDriver: {e}")
+        return None
 
-# Функция для загрузки страницы с помощью Selenium
+# Загрузка страницы через Selenium
 def fetch_page(url):
-    logging.info(f"Загрузка страницы: {url}")
+    logger = logging.getLogger('roblox_crawler')
+    logger.info(f"Загрузка страницы: {url}", extra={'url': url})
     driver = setup_driver()
+    if not driver:
+        return None
     try:
         driver.get(url)
-        driver.implicitly_wait(5)
+        driver.implicitly_wait(10)
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        max_scroll_attempts = 5
+        attempts = 0
+        while attempts < max_scroll_attempts:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:
+                break
+            last_height = new_height
+            attempts += 1
         page_source = driver.page_source
-        logging.info("Страница успешно загружена")
+        logger.info("Страница успешно загружена", extra={'url': url})
         return page_source
     except Exception as e:
-        logging.error(f"Ошибка при загрузке страницы через Selenium: {e}")
-        print(f"Ошибка при загрузке страницы через Selenium: {e}")
+        logger.error(f"Ошибка при загрузке страницы через Selenium: {e}", extra={'url': url})
         return None
     finally:
         driver.quit()
 
-# Асинхронная функция для загрузки ресурса
-async def fetch_resource_async(url, session):
-    logging.info(f"Загрузка ресурса: {url}")
+# Проверка доступности URL
+async def check_url_availability(url, session, retries=3):
+    logger = logging.getLogger('roblox_crawler')
+    for attempt in range(retries):
+        try:
+            async with session.head(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10) as response:
+                return response.status == 200
+        except Exception as e:
+            logger.error(f"Попытка {attempt + 1}/{retries} - Ошибка проверки URL {url}: {e}", extra={'url': url})
+            if attempt == retries - 1:
+                return False
+            await asyncio.sleep(1)
+    return False
+
+# Асинхронная загрузка ресурса
+async def fetch_resource_async(url, session, binary=False, retries=3):
+    logger = logging.getLogger('roblox_crawler')
+    logger.info(f"Загрузка ресурса: {url}", extra={'url': url})
+    for attempt in range(retries):
+        try:
+            async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10) as response:
+                response.raise_for_status()
+                if binary:
+                    content = await response.read()
+                else:
+                    content = await response.text()
+                logger.info(f"Ресурс успешно загружен: {url}", extra={'url': url})
+                return content
+        except Exception as e:
+            logger.error(f"Попытка {attempt + 1}/{retries} - Ошибка при загрузке ресурса {url}: {e}", extra={'url': url})
+            if attempt == retries - 1:
+                return None
+            await asyncio.sleep(1)
+
+# Получение размеров изображения
+async def get_image_dimensions(url, session, binary_data=None):
+    logger = logging.getLogger('roblox_crawler')
     try:
-        async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}) as response:
-            response.raise_for_status()
-            content = await response.text()
-            logging.info(f"Ресурс успешно загружен: {url}")
-            return content
+        if binary_data:
+            img_data = binary_data
+        else:
+            async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10) as response:
+                img_data = await response.read()
+        img = Image.open(BytesIO(img_data))
+        return img.size
     except Exception as e:
-        logging.error(f"Ошибка при загрузке ресурса {url}: {e}")
-        print(f"Ошибка при загрузке ресурса {url}: {e}")
+        logger.error(f"Ошибка получения размеров изображения {url}: {e}", extra={'url': url})
         return None
 
-# Функция для извлечения шрифтов из CSS
+# Получение метаданных медиа
+async def get_media_metadata(url, session, media_type="video"):
+    logger = logging.getLogger('roblox_crawler')
+    try:
+        async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10) as response:
+            media_data = await response.read()
+        temp_file = f"temp_{media_type}_{hashlib.md5(url.encode()).hexdigest()}.tmp"
+        with open(temp_file, "wb") as f:
+            f.write(media_data)
+
+        container = av.open(temp_file)
+        duration = container.duration / 1_000_000
+
+        resolution = None
+        if media_type == "video":
+            video_stream = next((stream for stream in container.streams if stream.type == 'video'), None)
+            if video_stream:
+                resolution = [video_stream.width, video_stream.height]
+
+        container.close()
+        os.remove(temp_file)
+
+        return {
+            "duration": duration,
+            "resolution": resolution if media_type == "video" else None
+        }
+    except Exception as e:
+        logger.error(f"Ошибка получения метаданных {media_type} {url}: {e}", extra={'url': url})
+        return None
+
+# Извлечение шрифтов из CSS
 async def extract_fonts_from_css(css_content, base_url, session):
-    fonts = []
+    logger = logging.getLogger('roblox_crawler')
+    fonts = set()
     font_face_rules = re.findall(r'@font-face\s*{[^}]+}', css_content, re.DOTALL)
     for rule in font_face_rules:
         urls = re.findall(r'url\(([^)]+)\)', rule)
         for url in urls:
             url = url.strip('\'"')
-            if url:
+            if url and re.search(r'\.(woff|woff2|ttf|otf|eot)', url):
                 font_url = urljoin(base_url, url)
-                fonts.append(font_url)
-                logging.info(f"Найден шрифт в CSS: {font_url}")
-    return fonts
+                is_available = await check_url_availability(font_url, session)
+                fonts.add((font_url, is_available))
+                logger.info(f"Найден шрифт в CSS (@font-face): {font_url}, доступен: {is_available}", extra={'url': base_url})
 
-# Функция для извлечения CSS
+    import_rules = re.findall(r'@import\s+url\(([^)]+)\)', css_content)
+    for import_url in import_rules:
+        import_url = import_url.strip('\'"')
+        if import_url:
+            import_url = urljoin(base_url, import_url)
+            css = await fetch_resource_async(import_url, session)
+            if css:
+                imported_fonts = await extract_fonts_from_css(css, base_url, session)
+                fonts.update(imported_fonts)
+
+    return [{"url": url, "is_available": is_available} for url, is_available in fonts]
+
+# Извлечение CSS
 async def extract_css(soup, base_url, session):
+    logger = logging.getLogger('roblox_crawler')
     inline_css = []
     external_css = []
-    all_fonts = []
+    all_fonts = set()
 
     style_tags = soup.find_all('style')
     for i, style in enumerate(style_tags, 1):
@@ -131,38 +259,58 @@ async def extract_css(soup, base_url, session):
         if css:
             inline_css.append(css)
             fonts = await extract_fonts_from_css(css, base_url, session)
-            all_fonts.extend(fonts)
+            all_fonts.update((font['url'], font['is_available']) for font in fonts)
             filename = f"style_{i}.css"
             with open(f"output/css/inline/{filename}", 'w', encoding='utf-8') as f:
                 f.write(css)
         style.decompose()
+
+    elements_with_style = soup.find_all(lambda tag: tag.has_attr('style'))
+    for i, element in enumerate(elements_with_style, 1):
+        css = element['style'].strip()
+        if css:
+            inline_css.append(css)
+            fonts = await extract_fonts_from_css(css, base_url, session)
+            all_fonts.update((font['url'], font['is_available']) for font in fonts)
+            filename = f"style_attr_{i}.css"
+            with open(f"output/css/inline/{filename}", 'w', encoding='utf-8') as f:
+                f.write(css)
+        del element['style']
 
     link_tags = soup.find_all('link', rel='stylesheet')
     for link in link_tags:
         href = link.get('href')
         if href:
             href = urljoin(base_url, href)
-            css = await fetch_resource_async(href, session)
+            is_available = await check_url_availability(href, session)
+            css = await fetch_resource_async(href, session) if is_available else None
             if css:
                 external_css.append(css)
                 fonts = await extract_fonts_from_css(css, base_url, session)
-                all_fonts.extend(fonts)
+                all_fonts.update((font['url'], font['is_available']) for font in fonts)
                 filename = generate_filename(href, "css")
                 with open(f"output/css/external/{filename}", 'w', encoding='utf-8') as f:
                     f.write(css)
+            else:
+                logger.warning(f"CSS недоступен: {href}", extra={'url': base_url})
         link.decompose()
 
     link_tags = soup.find_all('link', href=re.compile(r'fonts\.googleapis\.com'))
     for link in link_tags:
         href = link.get('href')
         if href:
-            all_fonts.append(href)
-            logging.info(f"Найден шрифт через Google Fonts: {href}")
+            all_fonts.add((href, True))
+            logger.info(f"Найден шрифт через Google Fonts: {href}", extra={'url': base_url})
 
-    return {'inline': inline_css, 'external': external_css, 'fonts': all_fonts}
+    return {
+        'inline': inline_css,
+        'external': external_css,
+        'fonts': [{"url": url, "is_available": is_available} for url, is_available in all_fonts]
+    }
 
-# Функция для извлечения JavaScript
+# Извлечение JavaScript
 async def extract_js(soup, base_url, session):
+    logger = logging.getLogger('roblox_crawler')
     inline_js = []
     external_js = []
 
@@ -171,12 +319,15 @@ async def extract_js(soup, base_url, session):
         src = script.get('src')
         if src:
             src = urljoin(base_url, src)
-            js = await fetch_resource_async(src, session)
+            is_available = await check_url_availability(src, session)
+            js = await fetch_resource_async(src, session) if is_available else None
             if js:
                 external_js.append(js)
                 filename = generate_filename(src, "js")
                 with open(f"output/js/external/{filename}", 'w', encoding='utf-8') as f:
                     f.write(js)
+            else:
+                logger.warning(f"JavaScript недоступен: {src}", extra={'url': base_url})
         else:
             js = script.get_text(strip=True)
             if js:
@@ -186,55 +337,95 @@ async def extract_js(soup, base_url, session):
                     f.write(js)
         script.decompose()
 
+    event_attrs = ['onclick', 'onchange', 'onmouseover', 'onmouseout', 'onload']
+    i = 1
+    for element in soup.find_all(True):
+        for attr in event_attrs:
+            if element.has_attr(attr):
+                js = element[attr].strip()
+                if js:
+                    inline_js.append(js)
+                    filename = f"event_{attr}_{i}.js"
+                    with open(f"output/js/inline/{filename}", 'w', encoding='utf-8') as f:
+                        f.write(js)
+                    i += 1
+                del element[attr]
+
     return {'inline': inline_js, 'external': external_js}
 
-# Функция для извлечения изображений
-def extract_images(soup, base_url):
-    images = []
+# Извлечение изображений
+async def extract_images(soup, base_url, css_data, session):
+    logger = logging.getLogger('roblox_crawler')
+    images = set()
+
     img_tags = soup.find_all('img')
     for img in img_tags:
-        src = img.get('src')
+        src = img.get('src') or img.get('data-src')
         if src:
             src = urljoin(base_url, src)
-            images.append(src)
-    return images
+            is_available = await check_url_availability(src, session)
+            dimensions = await get_image_dimensions(src, session) if is_available else None
+            images.add((src, is_available, dimensions))
 
-# Функция для извлечения видео
-def extract_videos(soup, base_url):
-    videos = []
+    for css in css_data['inline'] + css_data['external']:
+        bg_images = re.findall(r'background-image:\s*url\(([^)]+)\)', css)
+        for img_url in bg_images:
+            img_url = img_url.strip('\'"')
+            if img_url:
+                img_url = urljoin(base_url, img_url)
+                is_available = await check_url_availability(img_url, session)
+                dimensions = await get_image_dimensions(img_url, session) if is_available else None
+                images.add((img_url, is_available, dimensions))
+
+    return [{"url": url, "is_available": is_available, "dimensions": dimensions} for url, is_available, dimensions in images]
+
+# Извлечение видео
+async def extract_videos(soup, base_url, session):
+    logger = logging.getLogger('roblox_crawler')
+    videos = set()
     video_tags = soup.find_all('video')
     for video in video_tags:
-        src = video.get('src')
+        src = video.get('src') or video.get('poster')
         if src:
             src = urljoin(base_url, src)
-            videos.append(src)
+            is_available = await check_url_availability(src, session)
+            metadata = await get_media_metadata(src, session, "video") if is_available else None
+            videos.add((src, is_available, metadata))
         sources = video.find_all('source')
         for source in sources:
             src = source.get('src')
-            if src:
+            if src and source.get('type', '').startswith('video/'):
                 src = urljoin(base_url, src)
-                videos.append(src)
-    return videos
+                is_available = await check_url_availability(src, session)
+                metadata = await get_media_metadata(src, session, "video") if is_available else None
+                videos.add((src, is_available, metadata))
+    return [{"url": url, "is_available": is_available, "metadata": metadata} for url, is_available, metadata in videos]
 
-# Функция для извлечения аудио
-def extract_audio(soup, base_url):
-    audio_files = []
+# Извлечение аудио
+async def extract_audio(soup, base_url, session):
+    logger = logging.getLogger('roblox_crawler')
+    audio_files = set()
     audio_tags = soup.find_all('audio')
     for audio in audio_tags:
-        src = audio.get('src')
+        src = audio.get('src') or audio.get('data-src')
         if src:
             src = urljoin(base_url, src)
-            audio_files.append(src)
+            is_available = await check_url_availability(src, session)
+            metadata = await get_media_metadata(src, session, "audio") if is_available else None
+            audio_files.add((src, is_available, metadata))
         sources = audio.find_all('source')
         for source in sources:
             src = source.get('src')
-            if src:
+            if src and source.get('type', '').startswith('audio/'):
                 src = urljoin(base_url, src)
-                audio_files.append(src)
-    return audio_files
+                is_available = await check_url_availability(src, session)
+                metadata = await get_media_metadata(src, session, "audio") if is_available else None
+                audio_files.add((src, is_available, metadata))
+    return [{"url": url, "is_available": is_available, "metadata": metadata} for url, is_available, metadata in audio_files]
 
-# Функция для извлечения iframe
+# Извлечение iframe
 async def extract_iframes(soup, base_url, session):
+    logger = logging.getLogger('roblox_crawler')
     iframes = []
     iframe_tags = soup.find_all('iframe')
     for iframe in iframe_tags:
@@ -243,240 +434,263 @@ async def extract_iframes(soup, base_url, session):
             'url': None,
             'id': iframe.get('id', ''),
             'class': iframe.get('class', []),
-            'content': None
+            'width': iframe.get('width', ''),
+            'height': iframe.get('height', ''),
+            'title': iframe.get('title', ''),
+            'content': None,
+            'is_available': False
         }
         if src:
             src = urljoin(base_url, src)
             iframe_info['url'] = src
+            iframe_info['is_available'] = await check_url_availability(src, session)
             parsed_base = urlparse(base_url)
             parsed_iframe = urlparse(src)
-            if parsed_base.netloc == parsed_iframe.netloc:
+            if parsed_base.netloc == parsed_iframe.netloc and iframe_info['is_available']:
                 content = await fetch_resource_async(src, session)
                 if content:
                     iframe_info['content'] = content
-                    logging.info(f"Содержимое iframe загружено: {src}")
+                else:
+                    driver = setup_driver()
+                    if driver:
+                        try:
+                            driver.get(src)
+                            driver.implicitly_wait(5)
+                            iframe_info['content'] = driver.page_source
+                            logger.info(f"Содержимое iframe загружено через Selenium: {src}", extra={'url': base_url})
+                        except Exception as e:
+                            logger.error(f"Ошибка загрузки iframe через Selenium: {e}", extra={'url': src})
+                        finally:
+                            driver.quit()
             iframes.append(iframe_info)
-            logging.info(f"Найден iframe: {src}")
-
+            logger.info(f"Найден iframe: {src}, доступен: {iframe_info['is_available']}", extra={'url': base_url})
     return iframes
 
-# Функция для извлечения favicon
-async def extract_favicon(soup, base_url, session):
+# Извлечение favicon
+async def extract_favicon(soup, base_url, session, processed_favicons):
+    logger = logging.getLogger('roblox_crawler')
     favicon_info = {
         'url': None,
         'type': None,
-        'sizes': None
+        'sizes': None,
+        'is_available': False,
+        'dimensions': None
     }
-    # Ищем favicon в тегах <link>
-    link_tags = soup.find_all('link', rel=re.compile(r'icon', re.I))
+
+    link_tags = soup.find_all('link', rel=re.compile(r'icon|apple-touch-icon', re.I))
     for link in link_tags:
         href = link.get('href')
         if href:
-            favicon_info['url'] = urljoin(base_url, href)
+            favicon_url = urljoin(base_url, href)
+            if favicon_url in processed_favicons:
+                continue
+            processed_favicons.add(favicon_url)
+            favicon_info['url'] = favicon_url
             favicon_info['type'] = link.get('type', '')
             favicon_info['sizes'] = link.get('sizes', '')
-            logging.info(f"Найден favicon через <link>: {favicon_info['url']}")
+            favicon_info['is_available'] = await check_url_availability(favicon_url, session)
+            if favicon_info['is_available']:
+                favicon_info['dimensions'] = await get_image_dimensions(favicon_url, session)
+                content = await fetch_resource_async(favicon_url, session, binary=True)
+                if content:
+                    filename = generate_filename(favicon_url, "ico", "output/favicon/")
+                    with open(filename, 'wb') as f:
+                        f.write(content)
+            logger.info(f"Найден favicon через <link>: {favicon_url}, доступен: {favicon_info['is_available']}", extra={'url': base_url})
             break
 
-    # Если favicon не найден в <link>, пробуем стандартный путь /favicon.ico
     if not favicon_info['url']:
-        default_favicon = urljoin(base_url, '/favicon.ico')
-        content = await fetch_resource_async(default_favicon, session)
-        if content:
-            favicon_info['url'] = default_favicon
-            logging.info(f"Найден favicon по стандартному пути: {default_favicon}")
+        default_paths = ['/favicon.ico', '/apple-touch-icon.png']
+        for path in default_paths:
+            default_favicon = urljoin(base_url, path)
+            if default_favicon in processed_favicons:
+                continue
+            processed_favicons.add(default_favicon)
+            content = await fetch_resource_async(default_favicon, session, binary=True)
+            if content:
+                favicon_info['url'] = default_favicon
+                favicon_info['is_available'] = True
+                favicon_info['dimensions'] = await get_image_dimensions(default_favicon, session, binary_data=content)
+                filename = generate_filename(default_favicon, "ico", "output/favicon/")
+                with open(filename, 'wb') as f:
+                    f.write(content)
+                logger.info(f"Найден favicon по стандартному пути: {default_favicon}", extra={'url': base_url})
+                break
 
     return favicon_info
 
-# Функция для разделения HTML
+# Разделение HTML
 def split_html(soup):
-    # Извлекаем мета-теги
     meta_tags = soup.find_all('meta')
     meta_html = '\n'.join(str(tag) for tag in meta_tags)
 
-    # Извлекаем содержимое <head>
+    title_tag = soup.find('title')
+    title_html = str(title_tag) if title_tag else ''
+
     head = soup.find('head')
     head_html = str(head) if head else ''
 
-    # Извлекаем содержимое <body>
     body = soup.find('body')
     body_html = str(body) if body else ''
 
-    # Полный HTML
+    header = body.find('header') if body else None
+    header_html = str(header) if header else ''
+
+    main = body.find('main') if body else None
+    main_html = str(main) if main else ''
+
+    footer = body.find('footer') if body else None
+    footer_html = str(footer) if footer else ''
+
     full_html = str(soup.prettify())
 
     return {
         'meta': meta_html,
+        'title': title_html,
         'head': head_html,
         'body': body_html,
+        'header': header_html,
+        'main': main_html,
+        'footer': footer_html,
         'full': full_html
     }
 
-# Основная функция для разделения кода
-async def split_page_code(url):
-    # Настройка логирования и создание папок
-    setup_logging()
-    create_directories()
+# Генерация логичного имени секции на основе URL
+def generate_section_name(url):
+    parsed_url = urlparse(url)
+    path = parsed_url.path.strip('/').replace('/', '_') or 'index'
+    return re.sub(r'[^\w\-]', '_', path)[:50]
 
-    # Загружаем страницу
+# Обработка одной страницы
+async def process_page(url, session, visited, processed_favicons):
+    logger = logging.getLogger('roblox_crawler')
+    if url in visited:
+        return []
+    visited.add(url)
+
+    logger.info(f"Обработка страницы: {url}", extra={'url': url})
+    section = generate_section_name(url)
+    create_directories(section)
+
     page_content = fetch_page(url)
     if not page_content:
-        return
+        return []
 
-    # Парсим HTML
     soup = BeautifulSoup(page_content, 'html.parser')
-
-    # Извлекаем базовый URL
     base_url = '/'.join(url.split('/')[:3])
 
-    # Создаем асинхронную сессию для загрузки ресурсов
+    css_data = await extract_css(soup, base_url, session)
+    fonts = css_data['fonts']
+    js = await extract_js(soup, base_url, session)
+    images = await extract_images(soup, base_url, css_data, session)
+    videos = await extract_videos(soup, base_url, session)
+    audio = await extract_audio(soup, base_url, session)
+    iframes = await extract_iframes(soup, base_url, session)
+    favicon = await extract_favicon(soup, base_url, session, processed_favicons)
+    html_parts = split_html(soup)
+
+    # Сохранение HTML
+    for part, content in html_parts.items():
+        if part == 'full':
+            part_dir = 'main'
+        else:
+            part_dir = part
+        with open(f'output/html/{section}/{part_dir}/{part}.html', 'w', encoding='utf-8') as f:
+            f.write(content)
+
+    # Сохранение списков ресурсов
+    with open('output/images/image_list.txt', 'a', encoding='utf-8') as f:
+        f.write(f"\n\n=== {url} ===\n")
+        for img in images:
+            f.write(f"URL: {img['url']}, Доступен: {img['is_available']}, Размеры: {img['dimensions']}\n")
+    with open('output/fonts/font_list.txt', 'a', encoding='utf-8') as f:
+        f.write(f"\n\n=== {url} ===\n")
+        for font in fonts:
+            f.write(f"URL: {font['url']}, Доступен: {font['is_available']}\n")
+    with open('output/videos/video_list.txt', 'a', encoding='utf-8') as f:
+        f.write(f"\n\n=== {url} ===\n")
+        for video in videos:
+            f.write(f"URL: {video['url']}, Доступен: {video['is_available']}, Метаданные: {video['metadata']}\n")
+    with open('output/audio/audio_list.txt', 'a', encoding='utf-8') as f:
+        f.write(f"\n\n=== {url} ===\n")
+        for a in audio:
+            f.write(f"URL: {a['url']}, Доступен: {a['is_available']}, Метаданные: {a['metadata']}\n")
+    with open(f'output/iframes/iframe_list_{section}.txt', 'w', encoding='utf-8') as f:
+        for iframe in iframes:
+            f.write(f"URL: {iframe['url']}\nID: {iframe['id']}\nClass: {iframe['class']}\nWidth: {iframe['width']}\nHeight: {iframe['height']}\nTitle: {iframe['title']}\nContent: {iframe['content']}\nДоступен: {iframe['is_available']}\n\n")
+    with open(f'output/favicon/favicon_info_{section}.txt', 'w', encoding='utf-8') as f:
+        f.write(f"URL: {favicon['url']}\nType: {favicon['type']}\nSizes: {favicon['sizes']}\nДоступен: {favicon['is_available']}\nРазмеры: {favicon['dimensions']}")
+
+    # Вывод результатов
+    print(f"\n=== Страница: {url} ===")
+    for part_name, part_content in html_parts.items():
+        print(f"\n=== HTML ({part_name}) ===")
+        print(part_content if part_content.strip() else f"{part_name} отсутствует")
+
+    print("\n=== CSS (встроенные) ===")
+    print(css_data['inline'] or "Встроенные стили отсутствуют")
+
+    print("\n=== CSS (внешние) ===")
+    print(css_data['external'] or "Внешние стили отсутствуют")
+
+    print("\n=== JavaScript (встроенные) ===")
+    print(js['inline'] or "Встроенные скрипты отсутствуют")
+
+    print("\n=== JavaScript (внешние) ===")
+    print(js['external'] or "Внешние скрипты отсутствуют")
+
+    print("\n=== Изображения ===")
+    print(images or "Изображения отсутствуют")
+
+    print("\n=== Шрифты ===")
+    print(fonts or "Шрифты отсутствуют")
+
+    print("\n=== Видео ===")
+    print(videos or "Видео отсутствуют")
+
+    print("\n=== Аудио ===")
+    print(audio or "Аудио отсутствует")
+
+    print("\n=== Iframes ===")
+    print(iframes or "Iframes отсутствуют")
+
+    print("\n=== Favicon ===")
+    print(favicon)
+
+    # Поиск новых ссылок
+    links = set()
+    for a_tag in soup.find_all('a', href=True):
+        href = a_tag['href']
+        href = urljoin(base_url, href)
+        parsed_href = urlparse(href)
+        parsed_base = urlparse(base_url)
+        if parsed_href.netloc == parsed_base.netloc and href not in visited:
+            links.add(href)
+
+    return list(links)
+
+# Основная функция обхода сайта
+async def crawl_website(start_url):
+    logger = logging.getLogger('roblox_crawler')
+    visited = set()
+    to_visit = [start_url]
+    processed_favicons = set()
+
     async with aiohttp.ClientSession() as session:
-        # Извлекаем CSS и шрифты
-        css_data = await extract_css(soup, base_url, session)
-        css = css_data
-        fonts = css_data['fonts']
+        while to_visit:
+            current_batch = to_visit[:5]
+            to_visit = to_visit[5:]
+            tasks = [process_page(url, session, visited, processed_favicons) for url in current_batch]
+            new_links = await asyncio.gather(*tasks)
+            for links in new_links:
+                to_visit.extend(link for link in links if link not in to_visit and link not in visited)
 
-        # Извлекаем JavaScript
-        js = await extract_js(soup, base_url, session)
-
-        # Извлекаем изображения
-        images = extract_images(soup, base_url)
-
-        # Извлекаем видео
-        videos = extract_videos(soup, base_url)
-
-        # Извлекаем аудио
-        audio = extract_audio(soup, base_url)
-
-        # Извлекаем iframe
-        iframes = await extract_iframes(soup, base_url, session)
-
-        # Извлекаем favicon
-        favicon = await extract_favicon(soup, base_url, session)
-
-        # Разделяем HTML
-        html_parts = split_html(soup)
-
-        # Сохраняем HTML
-        with open('output/html/main/main.html', 'w', encoding='utf-8') as f:
-            f.write(html_parts['full'])
-        with open('output/html/meta/meta.html', 'w', encoding='utf-8') as f:
-            f.write(html_parts['meta'])
-        with open('output/html/head/head.html', 'w', encoding='utf-8') as f:
-            f.write(html_parts['head'])
-        with open('output/html/body/body.html', 'w', encoding='utf-8') as f:
-            f.write(html_parts['body'])
-
-        # Сохраняем списки ресурсов
-        with open('output/images/image_list.txt', 'w', encoding='utf-8') as f:
-            f.write('\n'.join(images))
-        with open('output/fonts/font_list.txt', 'w', encoding='utf-8') as f:
-            f.write('\n'.join(fonts))
-        with open('output/videos/video_list.txt', 'w', encoding='utf-8') as f:
-            f.write('\n'.join(videos))
-        with open('output/audio/audio_list.txt', 'w', encoding='utf-8') as f:
-            f.write('\n'.join(audio))
-        with open('output/iframes/iframe_list.txt', 'w', encoding='utf-8') as f:
-            for iframe in iframes:
-                f.write(f"URL: {iframe['url']}\nID: {iframe['id']}\nClass: {iframe['class']}\nContent: {iframe['content']}\n\n")
-        with open('output/favicon/favicon_info.txt', 'w', encoding='utf-8') as f:
-            f.write(f"URL: {favicon['url']}\nType: {favicon['type']}\nSizes: {favicon['sizes']}")
-
-        # Выводим результаты
-        print("\n=== HTML (основной) ===")
-        print(html_parts['full'] if html_parts['full'].strip() else "HTML-код пустой")
-
-        print("\n=== HTML (мета-теги) ===")
-        print(html_parts['meta'] if html_parts['meta'].strip() else "Мета-теги отсутствуют")
-
-        print("\n=== HTML (<head>) ===")
-        print(html_parts['head'] if html_parts['head'].strip() else "<head> отсутствует")
-
-        print("\n=== HTML (<body>) ===")
-        print(html_parts['body'] if html_parts['body'].strip() else "<body> отсутствует")
-
-        print("\n=== CSS (встроенные) ===")
-        if css['inline']:
-            for i, inline in enumerate(css['inline'], 1):
-                print(f"\nВстроенный стиль {i}:")
-                print(inline)
-        else:
-            print("Встроенные стили отсутствуют")
-
-        print("\n=== CSS (внешние) ===")
-        if css['external']:
-            for i, external in enumerate(css['external'], 1):
-                print(f"\nВнешний стиль {i}:")
-                print(external)
-        else:
-            print("Внешние стили отсутствуют")
-
-        print("\n=== JavaScript (встроенные) ===")
-        if js['inline']:
-            for i, inline in enumerate(js['inline'], 1):
-                print(f"\nВстроенный скрипт {i}:")
-                print(inline)
-        else:
-            print("Встроенные скрипты отсутствуют")
-
-        print("\n=== JavaScript (внешние) ===")
-        if js['external']:
-            for i, external in enumerate(js['external'], 1):
-                print(f"\nВнешний скрипт {i}:")
-                print(external)
-        else:
-            print("Внешние скрипты отсутствуют")
-
-        print("\n=== Изображения ===")
-        if images:
-            for img in images:
-                print(img)
-        else:
-            print("Изображения отсутствуют")
-
-        print("\n=== Шрифты ===")
-        if fonts:
-            for font in fonts:
-                print(font)
-        else:
-            print("Шрифты отсутствуют")
-
-        print("\n=== Видео ===")
-        if videos:
-            for video in videos:
-                print(video)
-        else:
-            print("Видео отсутствуют")
-
-        print("\n=== Аудио ===")
-        if audio:
-            for a in audio:
-                print(a)
-        else:
-            print("Аудио отсутствует")
-
-        print("\n=== Iframes ===")
-        if iframes:
-            for iframe in iframes:
-                print(f"URL: {iframe['url']}")
-                print(f"ID: {iframe['id']}")
-                print(f"Class: {iframe['class']}")
-                print(f"Content: {iframe['content'] if iframe['content'] else 'Не удалось загрузить содержимое'}")
-                print()
-        else:
-            print("Iframes отсутствуют")
-
-        print("\n=== Favicon ===")
-        print(f"URL: {favicon['url'] if favicon['url'] else 'Favicon отсутствует'}")
-        print(f"Type: {favicon['type']}")
-        print(f"Sizes: {favicon['sizes']}")
-
-        print("\n=== Логи ===")
-        print("Логи сохранены в 'output/logs/extraction.log'")
-
-        print("\nРезультаты сохранены в папку 'output' с соответствующей структурой.")
+    print("\n=== Логи ===")
+    print("Логи сохранены в 'output/logs/extraction.log'")
+    print("\nРезультаты сохранены в папку 'output' с соответствующей структурой.")
 
 # Точка входа
 if __name__ == "__main__":
-    url = "https://lolz.live/forums/86/"
-    asyncio.run(split_page_code(url))
+    setup_logging()
+    url = "https://paybis.com/ru/crypto-wallet/"
+    asyncio.run(crawl_website(url))
