@@ -1,0 +1,482 @@
+import requests
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+import re
+import os
+import logging
+import hashlib
+from urllib.parse import urljoin, urlparse
+import aiohttp
+import asyncio
+import nest_asyncio
+from datetime import datetime
+
+# Для работы с асинхронными запросами
+nest_asyncio.apply()
+
+# Настройка логирования
+def setup_logging():
+    log_dir = "output/logs"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "extraction.log")
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        encoding="utf-8"
+    )
+    logging.info("Начало процесса извлечения ресурсов")
+
+# Создание структуры папок
+def create_directories():
+    base_dir = "output"
+    directories = [
+        f"{base_dir}/html/main",
+        f"{base_dir}/html/meta",
+        f"{base_dir}/html/head",
+        f"{base_dir}/html/body",
+        f"{base_dir}/css/inline",
+        f"{base_dir}/css/external",
+        f"{base_dir}/js/inline",
+        f"{base_dir}/js/external",
+        f"{base_dir}/images",
+        f"{base_dir}/fonts",
+        f"{base_dir}/videos",
+        f"{base_dir}/audio",
+        f"{base_dir}/iframes",
+        f"{base_dir}/favicon",
+    ]
+    for directory in directories:
+        os.makedirs(directory, exist_ok=True)
+
+# Генерация уникального имени файла на основе URL
+def generate_filename(url, extension, prefix=""):
+    parsed_url = urlparse(url)
+    path = parsed_url.path
+    filename = os.path.basename(path)
+    if not filename:
+        filename = hashlib.md5(url.encode('utf-8')).hexdigest()
+    filename = re.sub(r'[^\w\-_\.]', '_', filename)
+    if not filename.endswith(f".{extension}"):
+        filename = f"{filename}.{extension}"
+    return f"{prefix}{filename}" if prefix else filename
+
+# Настройка Selenium для рендеринга динамического контента
+def setup_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    return driver
+
+# Функция для загрузки страницы с помощью Selenium
+def fetch_page(url):
+    logging.info(f"Загрузка страницы: {url}")
+    driver = setup_driver()
+    try:
+        driver.get(url)
+        driver.implicitly_wait(5)
+        page_source = driver.page_source
+        logging.info("Страница успешно загружена")
+        return page_source
+    except Exception as e:
+        logging.error(f"Ошибка при загрузке страницы через Selenium: {e}")
+        print(f"Ошибка при загрузке страницы через Selenium: {e}")
+        return None
+    finally:
+        driver.quit()
+
+# Асинхронная функция для загрузки ресурса
+async def fetch_resource_async(url, session):
+    logging.info(f"Загрузка ресурса: {url}")
+    try:
+        async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}) as response:
+            response.raise_for_status()
+            content = await response.text()
+            logging.info(f"Ресурс успешно загружен: {url}")
+            return content
+    except Exception as e:
+        logging.error(f"Ошибка при загрузке ресурса {url}: {e}")
+        print(f"Ошибка при загрузке ресурса {url}: {e}")
+        return None
+
+# Функция для извлечения шрифтов из CSS
+async def extract_fonts_from_css(css_content, base_url, session):
+    fonts = []
+    font_face_rules = re.findall(r'@font-face\s*{[^}]+}', css_content, re.DOTALL)
+    for rule in font_face_rules:
+        urls = re.findall(r'url\(([^)]+)\)', rule)
+        for url in urls:
+            url = url.strip('\'"')
+            if url:
+                font_url = urljoin(base_url, url)
+                fonts.append(font_url)
+                logging.info(f"Найден шрифт в CSS: {font_url}")
+    return fonts
+
+# Функция для извлечения CSS
+async def extract_css(soup, base_url, session):
+    inline_css = []
+    external_css = []
+    all_fonts = []
+
+    style_tags = soup.find_all('style')
+    for i, style in enumerate(style_tags, 1):
+        css = style.get_text(strip=True)
+        if css:
+            inline_css.append(css)
+            fonts = await extract_fonts_from_css(css, base_url, session)
+            all_fonts.extend(fonts)
+            filename = f"style_{i}.css"
+            with open(f"output/css/inline/{filename}", 'w', encoding='utf-8') as f:
+                f.write(css)
+        style.decompose()
+
+    link_tags = soup.find_all('link', rel='stylesheet')
+    for link in link_tags:
+        href = link.get('href')
+        if href:
+            href = urljoin(base_url, href)
+            css = await fetch_resource_async(href, session)
+            if css:
+                external_css.append(css)
+                fonts = await extract_fonts_from_css(css, base_url, session)
+                all_fonts.extend(fonts)
+                filename = generate_filename(href, "css")
+                with open(f"output/css/external/{filename}", 'w', encoding='utf-8') as f:
+                    f.write(css)
+        link.decompose()
+
+    link_tags = soup.find_all('link', href=re.compile(r'fonts\.googleapis\.com'))
+    for link in link_tags:
+        href = link.get('href')
+        if href:
+            all_fonts.append(href)
+            logging.info(f"Найден шрифт через Google Fonts: {href}")
+
+    return {'inline': inline_css, 'external': external_css, 'fonts': all_fonts}
+
+# Функция для извлечения JavaScript
+async def extract_js(soup, base_url, session):
+    inline_js = []
+    external_js = []
+
+    script_tags = soup.find_all('script')
+    for i, script in enumerate(script_tags, 1):
+        src = script.get('src')
+        if src:
+            src = urljoin(base_url, src)
+            js = await fetch_resource_async(src, session)
+            if js:
+                external_js.append(js)
+                filename = generate_filename(src, "js")
+                with open(f"output/js/external/{filename}", 'w', encoding='utf-8') as f:
+                    f.write(js)
+        else:
+            js = script.get_text(strip=True)
+            if js:
+                inline_js.append(js)
+                filename = f"script_{i}.js"
+                with open(f"output/js/inline/{filename}", 'w', encoding='utf-8') as f:
+                    f.write(js)
+        script.decompose()
+
+    return {'inline': inline_js, 'external': external_js}
+
+# Функция для извлечения изображений
+def extract_images(soup, base_url):
+    images = []
+    img_tags = soup.find_all('img')
+    for img in img_tags:
+        src = img.get('src')
+        if src:
+            src = urljoin(base_url, src)
+            images.append(src)
+    return images
+
+# Функция для извлечения видео
+def extract_videos(soup, base_url):
+    videos = []
+    video_tags = soup.find_all('video')
+    for video in video_tags:
+        src = video.get('src')
+        if src:
+            src = urljoin(base_url, src)
+            videos.append(src)
+        sources = video.find_all('source')
+        for source in sources:
+            src = source.get('src')
+            if src:
+                src = urljoin(base_url, src)
+                videos.append(src)
+    return videos
+
+# Функция для извлечения аудио
+def extract_audio(soup, base_url):
+    audio_files = []
+    audio_tags = soup.find_all('audio')
+    for audio in audio_tags:
+        src = audio.get('src')
+        if src:
+            src = urljoin(base_url, src)
+            audio_files.append(src)
+        sources = audio.find_all('source')
+        for source in sources:
+            src = source.get('src')
+            if src:
+                src = urljoin(base_url, src)
+                audio_files.append(src)
+    return audio_files
+
+# Функция для извлечения iframe
+async def extract_iframes(soup, base_url, session):
+    iframes = []
+    iframe_tags = soup.find_all('iframe')
+    for iframe in iframe_tags:
+        src = iframe.get('src')
+        iframe_info = {
+            'url': None,
+            'id': iframe.get('id', ''),
+            'class': iframe.get('class', []),
+            'content': None
+        }
+        if src:
+            src = urljoin(base_url, src)
+            iframe_info['url'] = src
+            parsed_base = urlparse(base_url)
+            parsed_iframe = urlparse(src)
+            if parsed_base.netloc == parsed_iframe.netloc:
+                content = await fetch_resource_async(src, session)
+                if content:
+                    iframe_info['content'] = content
+                    logging.info(f"Содержимое iframe загружено: {src}")
+            iframes.append(iframe_info)
+            logging.info(f"Найден iframe: {src}")
+
+    return iframes
+
+# Функция для извлечения favicon
+async def extract_favicon(soup, base_url, session):
+    favicon_info = {
+        'url': None,
+        'type': None,
+        'sizes': None
+    }
+    # Ищем favicon в тегах <link>
+    link_tags = soup.find_all('link', rel=re.compile(r'icon', re.I))
+    for link in link_tags:
+        href = link.get('href')
+        if href:
+            favicon_info['url'] = urljoin(base_url, href)
+            favicon_info['type'] = link.get('type', '')
+            favicon_info['sizes'] = link.get('sizes', '')
+            logging.info(f"Найден favicon через <link>: {favicon_info['url']}")
+            break
+
+    # Если favicon не найден в <link>, пробуем стандартный путь /favicon.ico
+    if not favicon_info['url']:
+        default_favicon = urljoin(base_url, '/favicon.ico')
+        content = await fetch_resource_async(default_favicon, session)
+        if content:
+            favicon_info['url'] = default_favicon
+            logging.info(f"Найден favicon по стандартному пути: {default_favicon}")
+
+    return favicon_info
+
+# Функция для разделения HTML
+def split_html(soup):
+    # Извлекаем мета-теги
+    meta_tags = soup.find_all('meta')
+    meta_html = '\n'.join(str(tag) for tag in meta_tags)
+
+    # Извлекаем содержимое <head>
+    head = soup.find('head')
+    head_html = str(head) if head else ''
+
+    # Извлекаем содержимое <body>
+    body = soup.find('body')
+    body_html = str(body) if body else ''
+
+    # Полный HTML
+    full_html = str(soup.prettify())
+
+    return {
+        'meta': meta_html,
+        'head': head_html,
+        'body': body_html,
+        'full': full_html
+    }
+
+# Основная функция для разделения кода
+async def split_page_code(url):
+    # Настройка логирования и создание папок
+    setup_logging()
+    create_directories()
+
+    # Загружаем страницу
+    page_content = fetch_page(url)
+    if not page_content:
+        return
+
+    # Парсим HTML
+    soup = BeautifulSoup(page_content, 'html.parser')
+
+    # Извлекаем базовый URL
+    base_url = '/'.join(url.split('/')[:3])
+
+    # Создаем асинхронную сессию для загрузки ресурсов
+    async with aiohttp.ClientSession() as session:
+        # Извлекаем CSS и шрифты
+        css_data = await extract_css(soup, base_url, session)
+        css = css_data
+        fonts = css_data['fonts']
+
+        # Извлекаем JavaScript
+        js = await extract_js(soup, base_url, session)
+
+        # Извлекаем изображения
+        images = extract_images(soup, base_url)
+
+        # Извлекаем видео
+        videos = extract_videos(soup, base_url)
+
+        # Извлекаем аудио
+        audio = extract_audio(soup, base_url)
+
+        # Извлекаем iframe
+        iframes = await extract_iframes(soup, base_url, session)
+
+        # Извлекаем favicon
+        favicon = await extract_favicon(soup, base_url, session)
+
+        # Разделяем HTML
+        html_parts = split_html(soup)
+
+        # Сохраняем HTML
+        with open('output/html/main/main.html', 'w', encoding='utf-8') as f:
+            f.write(html_parts['full'])
+        with open('output/html/meta/meta.html', 'w', encoding='utf-8') as f:
+            f.write(html_parts['meta'])
+        with open('output/html/head/head.html', 'w', encoding='utf-8') as f:
+            f.write(html_parts['head'])
+        with open('output/html/body/body.html', 'w', encoding='utf-8') as f:
+            f.write(html_parts['body'])
+
+        # Сохраняем списки ресурсов
+        with open('output/images/image_list.txt', 'w', encoding='utf-8') as f:
+            f.write('\n'.join(images))
+        with open('output/fonts/font_list.txt', 'w', encoding='utf-8') as f:
+            f.write('\n'.join(fonts))
+        with open('output/videos/video_list.txt', 'w', encoding='utf-8') as f:
+            f.write('\n'.join(videos))
+        with open('output/audio/audio_list.txt', 'w', encoding='utf-8') as f:
+            f.write('\n'.join(audio))
+        with open('output/iframes/iframe_list.txt', 'w', encoding='utf-8') as f:
+            for iframe in iframes:
+                f.write(f"URL: {iframe['url']}\nID: {iframe['id']}\nClass: {iframe['class']}\nContent: {iframe['content']}\n\n")
+        with open('output/favicon/favicon_info.txt', 'w', encoding='utf-8') as f:
+            f.write(f"URL: {favicon['url']}\nType: {favicon['type']}\nSizes: {favicon['sizes']}")
+
+        # Выводим результаты
+        print("\n=== HTML (основной) ===")
+        print(html_parts['full'] if html_parts['full'].strip() else "HTML-код пустой")
+
+        print("\n=== HTML (мета-теги) ===")
+        print(html_parts['meta'] if html_parts['meta'].strip() else "Мета-теги отсутствуют")
+
+        print("\n=== HTML (<head>) ===")
+        print(html_parts['head'] if html_parts['head'].strip() else "<head> отсутствует")
+
+        print("\n=== HTML (<body>) ===")
+        print(html_parts['body'] if html_parts['body'].strip() else "<body> отсутствует")
+
+        print("\n=== CSS (встроенные) ===")
+        if css['inline']:
+            for i, inline in enumerate(css['inline'], 1):
+                print(f"\nВстроенный стиль {i}:")
+                print(inline)
+        else:
+            print("Встроенные стили отсутствуют")
+
+        print("\n=== CSS (внешние) ===")
+        if css['external']:
+            for i, external in enumerate(css['external'], 1):
+                print(f"\nВнешний стиль {i}:")
+                print(external)
+        else:
+            print("Внешние стили отсутствуют")
+
+        print("\n=== JavaScript (встроенные) ===")
+        if js['inline']:
+            for i, inline in enumerate(js['inline'], 1):
+                print(f"\nВстроенный скрипт {i}:")
+                print(inline)
+        else:
+            print("Встроенные скрипты отсутствуют")
+
+        print("\n=== JavaScript (внешние) ===")
+        if js['external']:
+            for i, external in enumerate(js['external'], 1):
+                print(f"\nВнешний скрипт {i}:")
+                print(external)
+        else:
+            print("Внешние скрипты отсутствуют")
+
+        print("\n=== Изображения ===")
+        if images:
+            for img in images:
+                print(img)
+        else:
+            print("Изображения отсутствуют")
+
+        print("\n=== Шрифты ===")
+        if fonts:
+            for font in fonts:
+                print(font)
+        else:
+            print("Шрифты отсутствуют")
+
+        print("\n=== Видео ===")
+        if videos:
+            for video in videos:
+                print(video)
+        else:
+            print("Видео отсутствуют")
+
+        print("\n=== Аудио ===")
+        if audio:
+            for a in audio:
+                print(a)
+        else:
+            print("Аудио отсутствует")
+
+        print("\n=== Iframes ===")
+        if iframes:
+            for iframe in iframes:
+                print(f"URL: {iframe['url']}")
+                print(f"ID: {iframe['id']}")
+                print(f"Class: {iframe['class']}")
+                print(f"Content: {iframe['content'] if iframe['content'] else 'Не удалось загрузить содержимое'}")
+                print()
+        else:
+            print("Iframes отсутствуют")
+
+        print("\n=== Favicon ===")
+        print(f"URL: {favicon['url'] if favicon['url'] else 'Favicon отсутствует'}")
+        print(f"Type: {favicon['type']}")
+        print(f"Sizes: {favicon['sizes']}")
+
+        print("\n=== Логи ===")
+        print("Логи сохранены в 'output/logs/extraction.log'")
+
+        print("\nРезультаты сохранены в папку 'output' с соответствующей структурой.")
+
+# Точка входа
+if __name__ == "__main__":
+    url = "https://lolz.live/forums/86/"
+    asyncio.run(split_page_code(url))
