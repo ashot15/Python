@@ -1,0 +1,2042 @@
+
+import pygame as pg
+import math
+import sys
+import time
+import copy
+import random
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional, Sequence, Union, Any
+
+# --- Версия Библиотеки ---
+# Обновлена версия для отражения исправлений
+__version__ = "0.6.1"
+
+# --- Типы данных ---
+Vertex = Tuple[float, float]
+Color = Tuple[int, int, int, int] # RGBA (0-255)
+ScaleType = Union[float, Tuple[float, float]]
+SkewType = Union[float, Tuple[float, float]]
+
+# --- Константы ---
+EPSILON = 1e-6 # Малая величина для сравнения float и проверок на границе
+
+# --- Утилиты ---
+class TriangleError(ValueError):
+    """ Базовый класс исключений для этой библиотеки. """
+    pass
+
+# --- Функции Валидации (Полные, Улучшена читаемость ошибок) ---
+def _validate_color(color_tuple: Optional[Union[Tuple[int, int, int], Color]], param_name: str) -> Optional[Color]:
+    """Validates RGB or RGBA color, returns RGBA or None."""
+    if color_tuple is None: return None
+    # Ensure it's a list or tuple
+    if not isinstance(color_tuple, (list, tuple)):
+         raise TriangleError(f"'{param_name}': Color must be a tuple or list, got {type(color_tuple)}.")
+    # Check length (must be 3 for RGB or 4 for RGBA)
+    if len(color_tuple) not in [3, 4]:
+        raise TriangleError(f"'{param_name}': Invalid color format. Expected 3 (RGB) or 4 (RGBA) elements, got {len(color_tuple)} elements: {color_tuple}.")
+    # Check components are integers in valid range
+    if not all(isinstance(c, int) and 0 <= c <= 255 for c in color_tuple):
+        raise TriangleError(f"'{param_name}': Color components must be integers between 0 and 255. Got: {color_tuple}.")
+
+    # Convert RGB to RGBA if necessary
+    if len(color_tuple) == 3:
+        return (*color_tuple, 255) # Add full alpha
+    return tuple(color_tuple) # Return as 4-element RGBA tuple
+
+def _validate_vertices(vertices: List[Vertex]) -> List[Vertex]:
+    """Validates a list of 3 vertices."""
+    if not isinstance(vertices, list):
+         raise TriangleError(f"Triangle needs a list of vertices, got {type(vertices)}.")
+    if len(vertices) != 3:
+        raise TriangleError(f"Triangle needs a list of exactly 3 vertices, got {len(vertices)}.")
+    validated = []
+    for i, v in enumerate(vertices):
+        if not isinstance(v, (tuple, list)):
+            raise TriangleError(f"Vertex {i}: Must be a tuple or list, got {type(v)} ({v}).")
+        if len(v) != 2:
+           raise TriangleError(f"Vertex {i}: Must contain exactly 2 coordinates (x, y), got {len(v)} ({v}).")
+        try:
+            # Ensure coordinates are numbers (int or float) and convert to float
+            validated_v = (float(v[0]), float(v[1]))
+            validated.append(validated_v)
+        except (ValueError, TypeError):
+           raise TriangleError(f"Vertex {i}: Coordinates must be numbers (int/float), got invalid values in {v}.")
+    return validated
+
+def _validate_scale(scale_value: ScaleType) -> Tuple[float, float]:
+    """Validates scale factor (single float or tuple), returns (sx, sy) tuple."""
+    try:
+        if isinstance(scale_value, (int, float)):
+            s = max(0.0, float(scale_value)) # Ensure non-negative scale
+            return (s, s) # Uniform scale
+        elif isinstance(scale_value, (list, tuple)):
+            if len(scale_value) != 2:
+                 raise TriangleError(f"Scale tuple/list must have 2 elements (sx, sy), got {len(scale_value)}.")
+            sx = max(0.0, float(scale_value[0])) # Ensure non-negative sx
+            sy = max(0.0, float(scale_value[1])) # Ensure non-negative sy
+            return (sx, sy) # Non-uniform scale
+        else:
+             # Raise specific error if not number or sequence
+             raise TriangleError(f"Scale must be a number or a 2-element sequence (tuple/list), got {type(scale_value)}.")
+    except (ValueError, TypeError):
+        # Catch conversion errors like float('abc')
+        raise TriangleError(f"Invalid scale format. Could not convert values to floats in {scale_value}.")
+    except TriangleError as te:
+         raise te # Re-raise specific TriangleErrors from inner checks
+    except Exception as e: # Catch unexpected errors during validation
+         raise TriangleError(f"Unexpected error validating scale '{scale_value}': {e}")
+
+
+def _validate_vertex(vertex: Vertex, param_name: str) -> Vertex:
+     """Validates a single vertex (x,y tuple/list of numbers)."""
+     if not isinstance(vertex, (tuple, list)):
+          raise TriangleError(f"'{param_name}': Vertex must be a tuple or list, got {type(vertex)}.")
+     if len(vertex) != 2:
+          raise TriangleError(f"'{param_name}': Invalid format. Expected 2-element tuple/list (x, y), got {len(vertex)} elements in {vertex}.")
+     try:
+         x = float(vertex[0])
+         y = float(vertex[1])
+         # Check for NaN or infinity which might cause issues later
+         if not math.isfinite(x) or not math.isfinite(y):
+              raise ValueError("Coordinates must be finite numbers.")
+         return (x,y)
+     except (ValueError, TypeError):
+         raise TriangleError(f"'{param_name}': Coordinates must be finite numbers (int/float), got non-numeric values in {vertex}.")
+
+def _validate_skew(skew_value: SkewType) -> Tuple[float, float]:
+    """Validates skew factor (single float for x-skew, or tuple), returns (skx, sky) tuple."""
+    try:
+        if isinstance(skew_value, (int, float)):
+            sx = float(skew_value)
+             # Check for NaN/inf
+            if not math.isfinite(sx): raise ValueError("Skew value must be finite.")
+            return (sx, 0.0) # Skew only in x-direction
+        elif isinstance(skew_value, (list, tuple)):
+             if len(skew_value) != 2:
+                 raise TriangleError(f"Skew tuple/list must have 2 elements (skx, sky), got {len(skew_value)}.")
+             sx = float(skew_value[0])
+             sy = float(skew_value[1])
+             if not math.isfinite(sx) or not math.isfinite(sy):
+                  raise ValueError("Skew values must be finite numbers.")
+             return (sx, sy) # Separate x and y skew
+        else:
+             raise TriangleError(f"Skew must be a number or a 2-element sequence, got {type(skew_value)}.")
+    except (ValueError, TypeError):
+        raise TriangleError(f"Invalid skew format. Could not convert values to finite floats in {skew_value}.")
+    except TriangleError as te:
+         raise te
+    except Exception as e:
+         raise TriangleError(f"Unexpected error validating skew '{skew_value}': {e}")
+
+# --- Вспомогательные функции для lerp ---
+def _lerp(start: float, end: float, factor: float) -> float:
+    f = max(0.0, min(1.0, factor)) # Clamp factor to [0, 1]
+    return start + (end - start) * f
+
+# *** ИСПРАВЛЕНО: Syntax Error в type hint для Tuple ***
+def _lerp_tuple(start: Sequence[float], end: Sequence[float], factor: float) -> Tuple[float, ...]: # Использован 'Tuple[float, ...]'
+    """Linearly interpolates between two sequences of floats element-wise."""
+    if len(start) != len(end):
+        raise ValueError(f"Tuple lengths differ for lerp: len(start)={len(start)}, len(end)={len(end)}")
+    f = max(0.0, min(1.0, factor))
+    return tuple(start[i] + (end[i] - start[i]) * f for i in range(len(start)))
+
+def _lerp_color(start_color: Color, end_color: Color, factor: float) -> Color:
+    """Linearly interpolates between two RGBA colors."""
+    if not start_color or not end_color or len(start_color) != 4 or len(end_color) != 4:
+         raise ValueError("Lerp color requires valid RGBA start and end colors.") # Added check
+    f = max(0.0, min(1.0, factor))
+    # Interpolate each component and clamp to [0, 255]
+    r = int(start_color[0] + (end_color[0] - start_color[0]) * f)
+    g = int(start_color[1] + (end_color[1] - start_color[1]) * f)
+    b = int(start_color[2] + (end_color[2] - start_color[2]) * f)
+    a = int(start_color[3] + (end_color[3] - start_color[3]) * f)
+    # Clamp results rigorously
+    return (max(0, min(255, r)),
+            max(0, min(255, g)),
+            max(0, min(255, b)),
+            max(0, min(255, a)))
+
+
+# --- Функции трансформаций (добавлены проверки на NaN/inf) ---
+def _rotate_point(pivot_x: float, pivot_y: float, angle_degrees: float, point_x: float, point_y: float) -> Vertex:
+    """Rotates a point around a pivot."""
+    try:
+        rad = math.radians(angle_degrees)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        # Check for issues after trigonometric functions (unlikely but possible)
+        if not math.isfinite(cos_a) or not math.isfinite(sin_a):
+             raise ValueError("Rotation resulted in non-finite trigonometric values.")
+
+        # Translate point relative to pivot
+        rel_x = point_x - pivot_x
+        rel_y = point_y - pivot_y
+
+        # Rotate relative coordinates
+        rot_x = cos_a * rel_x - sin_a * rel_y
+        rot_y = sin_a * rel_x + cos_a * rel_y
+
+        # Translate back
+        final_x = rot_x + pivot_x
+        final_y = rot_y + pivot_y
+
+        # Final check for finite results
+        if not math.isfinite(final_x) or not math.isfinite(final_y):
+             raise ValueError("Rotation resulted in non-finite coordinates.")
+
+        return (final_x, final_y)
+    except ValueError as ve: # Catch math domain errors or our custom errors
+        # print(f"Warning: Rotate point failed - {ve}. Pivot:({pivot_x},{pivot_y}), Angle:{angle_degrees}, Point:({point_x},{point_y})")
+        return (point_x, point_y) # Return original point on failure? Or raise? Let's return original for stability.
+    except Exception as e: # Catch unexpected math issues
+         print(f"Unexpected error in _rotate_point: {e}. Returning original point.")
+         return (point_x, point_y)
+
+def _scale_point(pivot_x: float, pivot_y: float, scale_x: float, scale_y: float, point_x: float, point_y: float) -> Vertex:
+    """Scales a point around a pivot."""
+    try:
+        # Check scale factors (should be done by _validate_scale, but double-check)
+        if not math.isfinite(scale_x) or not math.isfinite(scale_y):
+             raise ValueError("Scale factors must be finite.")
+
+        # Scale relative coordinates and translate back
+        final_x = pivot_x + (point_x - pivot_x) * scale_x
+        final_y = pivot_y + (point_y - pivot_y) * scale_y
+
+        if not math.isfinite(final_x) or not math.isfinite(final_y):
+             raise ValueError("Scaling resulted in non-finite coordinates.")
+
+        return (final_x, final_y)
+    except ValueError as ve:
+        # print(f"Warning: Scale point failed - {ve}. Pivot:({pivot_x},{pivot_y}), Scale:({scale_x},{scale_y}), Point:({point_x},{point_y})")
+        return (point_x, point_y) # Return original point
+    except Exception as e:
+        print(f"Unexpected error in _scale_point: {e}. Returning original point.")
+        return (point_x, point_y)
+
+def _skew_point(pivot_x: float, pivot_y: float, skew_x_deg: float, skew_y_deg: float, point_x: float, point_y: float) -> Vertex:
+    """Skews a point around a pivot using shear mapping."""
+    try:
+        # Get tan of skew angles (in radians)
+        tan_x = math.tan(math.radians(skew_x_deg))
+        tan_y = math.tan(math.radians(skew_y_deg))
+
+        if not math.isfinite(tan_x) or not math.isfinite(tan_y):
+             # This can happen if skew angle is +/- 90 degrees, +/- 270 etc.
+             raise ValueError("Skew angle resulted in non-finite tangent (e.g., 90 degrees).")
+
+        # Translate point relative to pivot
+        rel_x = point_x - pivot_x
+        rel_y = point_y - pivot_y
+
+        # Apply shear transformation
+        skewed_x = rel_x + tan_x * rel_y
+        skewed_y = rel_y + tan_y * rel_x # Note: y skew depends on original *relative* x
+
+        # Translate back
+        final_x = skewed_x + pivot_x
+        final_y = skewed_y + pivot_y
+
+        if not math.isfinite(final_x) or not math.isfinite(final_y):
+            raise ValueError("Skewing resulted in non-finite coordinates.")
+
+        return (final_x, final_y)
+    except ValueError as ve:
+        # print(f"Warning: Skew point failed - {ve}. Pivot:({pivot_x},{pivot_y}), Skew:({skew_x_deg},{skew_y_deg}), Point:({point_x},{point_y})")
+        return (point_x, point_y) # Return original point
+    except Exception as e:
+        print(f"Unexpected error in _skew_point: {e}. Returning original point.")
+        return (point_x, point_y)
+
+
+def _is_point_in_triangle_barycentric(point_x: float, point_y: float, v1: Vertex, v2: Vertex, v3: Vertex) -> bool:
+    """Checks if a point is inside a triangle using barycentric coordinates."""
+    try:
+        # Check all inputs are finite numbers before calculations
+        if not all(math.isfinite(c) for c in [point_x, point_y, *v1, *v2, *v3]):
+             # print("Warning: Non-finite coordinate detected in is_point_in_triangle input.")
+             return False # Cannot reliably check with non-finite numbers
+
+        x1, y1 = v1
+        x2, y2 = v2
+        x3, y3 = v3
+
+        # Calculate denominator (related to triangle area * 2)
+        # Using a robust formula less prone to issues near horizontal/vertical lines
+        # Could also use vector cross products
+        denominator = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+
+        # Check for degenerate triangle (collinear vertices)
+        if abs(denominator) < EPSILON:
+            # Technically, point could lie *on* the line segment for degenerate case
+            # For simplicity, consider it not *inside*.
+            return False
+
+        # Calculate barycentric coordinates (alpha, beta, gamma) -> renamed a, b, c here
+        a = ((y2 - y3) * (point_x - x3) + (x3 - x2) * (point_y - y3)) / denominator
+        b = ((y3 - y1) * (point_x - x3) + (x1 - x3) * (point_y - y3)) / denominator
+        c = 1.0 - a - b # Since a + b + c = 1
+
+        # Point is inside if all coordinates are within [0, 1] (allowing slight epsilon for boundary)
+        return -EPSILON <= a <= 1.0 + EPSILON and \
+               -EPSILON <= b <= 1.0 + EPSILON and \
+               -EPSILON <= c <= 1.0 + EPSILON
+
+    except ZeroDivisionError: # Should be caught by abs(denominator) check, but safety first
+        # print("Warning: ZeroDivisionError in barycentric calculation (should be caught earlier).")
+        return False
+    except Exception as e: # Catch unexpected errors
+        print(f"Unexpected error in _is_point_in_triangle_barycentric: {e}")
+        return False
+
+# --- Улучшенный Класс Треугольника ---
+# (Минимальные изменения в классе Triangle, в основном в `_apply_transforms` для надежности)
+@dataclass
+class Triangle:
+    # --- Атрибуты ---
+    vertices_orig: List[Vertex] = field(default_factory=lambda: [(0.0, -25.0), (-25.0, 25.0), (25.0, 25.0)]) # Default simple triangle
+    fill_color: Optional[Color] = (150, 150, 220, 255) # Default fill: light blueish-purple, opaque
+    border_color: Color = (30, 30, 30, 255) # Default border: dark grey, opaque
+    border_thickness: int = 1 # Default border thickness in pixels
+    antialiasing: bool = True # Default AA enabled if possible
+    visible: bool = True # Default visible
+    position: Vertex = (0.0, 0.0) # Position offset (world space translation)
+    rotation_deg: float = 0.0 # Rotation in degrees around pivot
+    scale: Tuple[float, float] = (1.0, 1.0) # Scale factors (sx, sy) around pivot
+    skew_deg: Tuple[float, float] = (0.0, 0.0) # Skew angles in degrees (dx, dy) around pivot
+    pivot_offset: Vertex = (0.0, 0.0) # Pivot point relative to geometric center
+    alpha_multiplier: float = 1.0 # Multiplier for overall transparency [0.0, 1.0]
+    user_data: Any = None # For user-defined information
+
+    # --- Приватные/внутренние атрибуты ---
+    # _original_*: Хранят начальные значения для lerp-анимаций обратной связи
+    _original_border_color: Color = field(init=False, repr=False)
+    _original_border_thickness: int = field(init=False, repr=False)
+    # _center: Геометрический центр оригинальных вершин
+    _center: Vertex = field(init=False, repr=False, default=(0.0, 0.0))
+    # _transformed_*: Кэшированные результаты после применения трансформаций
+    _transformed_vertices: List[Vertex] = field(init=False, repr=False, default_factory=list)
+    _transformed_pivot_cache: Optional[Vertex] = field(init=False, repr=False, default=None)
+    # _cached_*: Кэшированные цвета после применения alpha_multiplier
+    _cached_fill_color: Optional[Color] = field(init=False, repr=False, default=None)
+    _cached_border_color: Color = field(init=False, repr=False, default=(0, 0, 0, 0)) # Default cache before calc
+    # _needs_recalc_*: Флаги, указывающие, нужно ли пересчитывать кэшированные значения
+    _needs_recalc_transform: bool = field(init=False, repr=False, default=True)
+    _needs_recalc_color: bool = field(init=False, repr=False, default=True)
+    # _bounding_box*: Текущий и предыдущий прямоугольники, описывающие область треугольника
+    _bounding_box: Optional[pg.Rect] = field(init=False, repr=False, default=None)
+    _previous_bounding_box: Optional[pg.Rect] = field(init=False, repr=False, default=None) # BBox before last change
+
+
+    def __post_init__(self):
+        """Post-initialization validation and setup."""
+        try:
+            # Validate all initial parameters using helper functions
+            self.vertices_orig = _validate_vertices(self.vertices_orig)
+            self.border_thickness = max(0, int(self.border_thickness)) # Ensure non-negative int
+            self.fill_color = _validate_color(self.fill_color, "fill_color")
+            # Ensure border color is always a valid RGBA tuple, default if needed
+            self.border_color = _validate_color(self.border_color, "border_color") or (0, 0, 0, 255)
+            self.antialiasing = bool(self.antialiasing)
+            self.visible = bool(self.visible)
+            self.position = _validate_vertex(self.position, "position")
+            self.rotation_deg = float(self.rotation_deg)
+            self.scale = _validate_scale(self.scale)
+            self.skew_deg = _validate_skew(self.skew_deg)
+            self.pivot_offset = _validate_vertex(self.pivot_offset, "pivot_offset")
+            # Clamp alpha multiplier
+            self.alpha_multiplier = max(0.0, min(1.0, float(self.alpha_multiplier)))
+
+            # Store original border properties for feedback lerping
+            self._original_border_color = self.border_color
+            self._original_border_thickness = self.border_thickness
+
+        except (TriangleError, ValueError, TypeError, IndexError) as e:
+            # Wrap validation errors in a more specific error message
+            raise TriangleError(f"Triangle initialization failed: {e}") from e
+        except Exception as e: # Catch any other unexpected errors
+             raise TriangleError(f"Unexpected error during Triangle init: {e}") from e
+
+
+        # Perform initial calculations
+        self._recalculate_center()
+        # Mark caches as needing calculation, but don't generate "previous" state yet
+        self._invalidate_transform(dirty=False)
+        self._invalidate_color(dirty=False)
+
+    def clone(self) -> 'Triangle':
+        """Creates a deep copy of this triangle."""
+        try:
+             # Deep copy ensures internal lists/tuples are copied, not referenced
+             cloned_tri = copy.deepcopy(self)
+             # Reset state specific to the instance on screen
+             cloned_tri._previous_bounding_box = None
+             cloned_tri._bounding_box = None # Force recalc on first use
+             cloned_tri._needs_recalc_transform = True
+             cloned_tri._needs_recalc_color = True
+             # Original border properties are part of the deep copy, which is correct
+             return cloned_tri
+        except Exception as e:
+            print(f"Error cloning triangle: {e}")
+            # Fallback: return a new default triangle? Or raise? Raising is probably better.
+            raise TriangleError(f"Failed to clone triangle: {e}") from e
+
+
+    def _recalculate_center(self) -> None:
+        """Calculates the geometric center (centroid) of the original vertices."""
+        if not self.vertices_orig or len(self.vertices_orig) < 3:
+            # Handle degenerate cases or empty vertex list gracefully
+            self._center = (0.0, 0.0)
+            return
+
+        try:
+             # Calculate average of x and y coordinates
+             sum_x = sum(v[0] for v in self.vertices_orig)
+             sum_y = sum(v[1] for v in self.vertices_orig)
+             num_verts = len(self.vertices_orig) # Should always be 3 here
+             self._center = (sum_x / num_verts, sum_y / num_verts)
+        except Exception as e:
+             print(f"Error calculating geometric center: {e}. Resetting to (0,0).")
+             self._center = (0.0, 0.0)
+
+
+    @property
+    def geometric_center(self) -> Vertex:
+        """Returns the calculated geometric center of the original vertices."""
+        # Note: If vertices_orig could be modified externally AFTER init,
+        # this might need to trigger _recalculate_center(). Current design assumes immutable orig vertices.
+        return self._center
+
+    @property
+    def current_pivot(self) -> Vertex:
+        """Calculates the current pivot point based on center and offset."""
+        # This is the point IN LOCAL SPACE (relative to original vertex coords) around which transformations occur.
+        cx, cy = self.geometric_center
+        ox, oy = self.pivot_offset
+        return (cx + ox, cy + oy)
+
+    def _apply_transforms(self) -> None:
+        """
+        Applies all transformations (skew, scale, rotate, translate) to the original vertices.
+        Updates _transformed_vertices, _transformed_pivot_cache, and _bounding_box.
+        Stores the previous _bounding_box before calculation.
+        """
+        # --- Preparation ---
+        # 1. Preserve the *current* bounding box as the *previous* one.
+        #    Do this *before* clearing or recalculating the current one.
+        #    Ensure we have a valid Rect object before copying.
+        if self._bounding_box and isinstance(self._bounding_box, pg.Rect):
+             self._previous_bounding_box = self._bounding_box.copy()
+        else:
+             self._previous_bounding_box = None # No valid previous box
+
+        # 2. Reset calculation-dependent state
+        self._transformed_vertices = [] # Clear previous transformed verts
+        self._bounding_box = None # Clear current bbox
+        self._transformed_pivot_cache = None # Clear cached pivot
+
+        # 3. Exit early if not visible or no vertices (nothing to transform)
+        if not self.visible or not self.vertices_orig or len(self.vertices_orig) < 3:
+             self._needs_recalc_transform = False # Mark as up-to-date (with empty state)
+             # Ensure previous bounding box is handled (cleared above if needed)
+             # print("Debug: Apply transforms skipped (invisible or no vertices)")
+             return
+
+        # --- Get Transform Parameters ---
+        try:
+             pivot_x, pivot_y = self.current_pivot # Local pivot point
+             scale_x, scale_y = self.scale
+             skew_x, skew_y = self.skew_deg
+             angle = self.rotation_deg
+             translate_x, translate_y = self.position # Final world offset
+
+             # Check for potential issues early (should be validated, but defense)
+             if not all(map(math.isfinite, [pivot_x, pivot_y, scale_x, scale_y, skew_x, skew_y, angle, translate_x, translate_y])):
+                  raise TriangleError("Non-finite transform parameter detected during application.")
+
+        except Exception as e:
+            print(f"Error getting transform parameters: {e}. Aborting transform.")
+            # State is already reset, mark as done (with empty result)
+            self._needs_recalc_transform = False
+            return
+
+        # --- Apply Transformation Pipeline to Vertices ---
+        final_vertices = []
+        min_x, min_y = float('inf'), float('inf')
+        max_x, max_y = float('-inf'), float('-inf')
+
+        transform_failed = False
+        for orig_x, orig_y in self.vertices_orig:
+            try:
+                # Pipeline: Skew -> Scale -> Rotate (relative to pivot), then Translate
+                # Ensure all intermediate results are finite numbers
+                if not math.isfinite(orig_x) or not math.isfinite(orig_y):
+                    raise ValueError(f"Original vertex {orig_x},{orig_y} is non-finite.")
+
+                # 1. Skew relative to pivot
+                sk_x, sk_y = _skew_point(pivot_x, pivot_y, skew_x, skew_y, orig_x, orig_y)
+
+                # 2. Scale relative to pivot
+                sc_x, sc_y = _scale_point(pivot_x, pivot_y, scale_x, scale_y, sk_x, sk_y)
+
+                # 3. Rotate relative to pivot
+                rot_x, rot_y = _rotate_point(pivot_x, pivot_y, angle, sc_x, sc_y)
+
+                # 4. Translate to final world position
+                final_x, final_y = rot_x + translate_x, rot_y + translate_y
+
+                # Final check on the result for this vertex
+                if not math.isfinite(final_x) or not math.isfinite(final_y):
+                    raise ValueError(f"Transformation resulted in non-finite vertex coordinate ({final_x}, {final_y})")
+
+                # Store valid transformed vertex
+                final_vertices.append((final_x, final_y))
+
+                # Update min/max bounds for bounding box
+                min_x, min_y = min(min_x, final_x), min(min_y, final_y)
+                max_x, max_y = max(max_x, final_x), max(max_y, final_y)
+
+            except (ValueError, TypeError, TriangleError) as e:
+                print(f"Error transforming vertex ({orig_x}, {orig_y}): {e}. Skipping vertex.")
+                transform_failed = True
+                # We could try to continue with other vertices, but the shape will be broken.
+                # Maybe abort the whole transform for this frame?
+                # For now, let's allow partial transforms but log it. The bbox might be weird.
+                continue # Skip to next vertex
+
+        # If any vertex failed, the overall transform is compromised.
+        if transform_failed or len(final_vertices) < 3:
+            print(f"Warning: Transform resulted in < 3 valid vertices for triangle {self.user_data}. Clearing transform state.")
+            # Reset state to empty as the result is invalid
+            self._transformed_vertices = []
+            self._bounding_box = None
+            self._transformed_pivot_cache = None
+            self._needs_recalc_transform = False # Mark as "calculated" (empty state)
+            # Keep previous bounding box from before this failed attempt.
+            return
+
+
+        # --- Update Cached Transformed State ---
+        self._transformed_vertices = final_vertices
+
+        # --- Calculate Bounding Box ---
+        try:
+             # Add padding for border thickness and potential AA spillover
+             # Ensure thickness is treated as number
+             border_thickness_num = float(self.border_thickness) if self.border_thickness else 0.0
+             border_pad = math.ceil(border_thickness_num / 2.0)
+             # Add a small fixed padding for safety/AA bleed
+             fixed_pad = 2
+             total_pad = border_pad + fixed_pad
+
+             # Calculate integer bounds carefully (use ceil/floor to fully contain floats)
+             # Ensure width/height are at least 1 pixel if shape is very small
+             bb_left = math.floor(min_x - total_pad)
+             bb_top = math.floor(min_y - total_pad)
+             bb_right = math.ceil(max_x + total_pad)
+             bb_bottom = math.ceil(max_y + total_pad)
+
+             bb_w = max(1, bb_right - bb_left)
+             bb_h = max(1, bb_bottom - bb_top)
+
+             # Create the Pygame Rect object
+             self._bounding_box = pg.Rect(bb_left, bb_top, bb_w, bb_h)
+             # print(f"Debug: Calculated BBox for {self.user_data}: {self._bounding_box}") # Debug
+
+        except Exception as e:
+            print(f"Error calculating bounding box: {e}. BBox set to None.")
+            self._bounding_box = None # Invalidate BBox on error
+             # Keep previous bbox
+
+
+        # --- Calculate Transformed Pivot Cache ---
+        try:
+            # Apply the same transform pipeline to the pivot point itself
+            p_skx, p_sky = _skew_point(pivot_x, pivot_y, skew_x, skew_y, pivot_x, pivot_y)
+            p_scx, p_scy = _scale_point(pivot_x, pivot_y, scale_x, scale_y, p_skx, p_sky)
+            p_rotx, p_roty = _rotate_point(pivot_x, pivot_y, angle, p_scx, p_scy)
+            # Translate the transformed local pivot to world space
+            self._transformed_pivot_cache = (p_rotx + translate_x, p_roty + translate_y)
+
+            if not self._transformed_pivot_cache or not all(map(math.isfinite, self._transformed_pivot_cache)):
+                 print(f"Warning: Transformed pivot calculation resulted in non-finite coordinates for {self.user_data}.")
+                 self._transformed_pivot_cache = None # Invalidate if non-finite
+
+        except Exception as e:
+             print(f"Error calculating transformed pivot cache: {e}")
+             self._transformed_pivot_cache = None # Invalidate on error
+
+
+        # --- Finalization ---
+        # Mark transform calculation as complete for this state
+        self._needs_recalc_transform = False
+
+
+    # --- Properties using transform/color cache ---
+    @property
+    def vertices(self) -> List[Vertex]:
+        """Returns the list of transformed vertices, recalculating if necessary."""
+        if self._needs_recalc_transform:
+            try:
+                self._apply_transforms()
+            except Exception as e: # Catch errors during the transform process itself
+                print(f"FATAL ERROR in _apply_transforms called from vertices property: {e}")
+                # In case of catastrophic failure in transform, return empty or raise?
+                # Let's return empty list to prevent crashing downstream code relying on vertices.
+                return []
+        # Return a copy to prevent external modification of the internal cache?
+        # return list(self._transformed_vertices) # Creates a copy
+        return self._transformed_vertices # Return direct reference for performance (assume read-only access)
+
+    @property
+    def transformed_pivot(self) -> Optional[Vertex]:
+        """Returns the cached transformed pivot point, recalculating if necessary."""
+        if self._needs_recalc_transform:
+             try:
+                 self._apply_transforms()
+             except Exception as e:
+                 print(f"FATAL ERROR in _apply_transforms called from transformed_pivot property: {e}")
+                 return None # Cannot return pivot if transform failed
+        return self._transformed_pivot_cache
+
+
+    def _recalculate_colors(self) -> None:
+        """Calculates cached fill and border colors based on base colors and alpha_multiplier."""
+        try:
+            mult = max(0.0, min(1.0, self.alpha_multiplier)) # Ensure multiplier is clamped
+
+            # Calculate fill color cache
+            if self.fill_color: # fill_color is already validated as RGBA or None
+                 r, g, b, base_a = self.fill_color
+                 final_a = int(base_a * mult)
+                 # Clamp final alpha value explicitly
+                 self._cached_fill_color = (r, g, b, max(0, min(255, final_a)))
+            else:
+                 self._cached_fill_color = None # No fill color
+
+            # Calculate border color cache (border_color is guaranteed RGBA by __post_init__)
+            br, bg, bb, base_ba = self.border_color
+            final_ba = int(base_ba * mult)
+            self._cached_border_color = (br, bg, bb, max(0, min(255, final_ba)))
+
+            # Mark color calculation as complete
+            self._needs_recalc_color = False
+
+        except Exception as e:
+            print(f"Error recalculating colors: {e}. Using default cached colors.")
+            # Attempt to set sensible defaults if calculation fails
+            self._cached_fill_color = None
+            self._cached_border_color = (0, 0, 0, 0) # Fully transparent black
+            self._needs_recalc_color = False # Mark as done, even though failed
+
+
+    @property
+    def current_fill_color(self) -> Optional[Color]:
+        """Returns the cached fill color (with alpha applied), recalculating if needed."""
+        if self._needs_recalc_color:
+            self._recalculate_colors() # Handles potential errors internally
+        return self._cached_fill_color
+
+    @property
+    def current_border_color(self) -> Color:
+        """Returns the cached border color (with alpha applied), recalculating if needed."""
+        if self._needs_recalc_color:
+             self._recalculate_colors() # Handles potential errors internally
+        # Ensure a valid Color tuple is always returned, even after error
+        return self._cached_border_color if self._cached_border_color else (0,0,0,0)
+
+
+    # --- Invalidation Methods ---
+    def _invalidate_transform(self, dirty=True):
+        """Marks transform caches as invalid (needs recalculation)."""
+        # No need to invalidate if already marked
+        if self._needs_recalc_transform: return
+
+        self._needs_recalc_transform = True
+        # Reset caches that depend on the transform
+        # self._transformed_vertices = [] # Clearing happens in _apply_transforms
+        self._transformed_pivot_cache = None
+        # Bounding box management moved fully into _apply_transforms:
+        # it copies current -> previous right before calculating new.
+        # Setting _bounding_box to None here prematurely could lose the current state
+        # before it's saved as previous if _apply_transforms isn't called immediately.
+
+        # The 'dirty' flag is primarily for managing previous_bounding_box,
+        # which is now handled inside _apply_transforms. We don't need explicit
+        # management here anymore.
+
+    def _invalidate_color(self, dirty=True):
+        """Marks color caches as invalid (needs recalculation)."""
+        if self._needs_recalc_color: return
+        self._needs_recalc_color = True
+        # Reset caches depending on color/alpha calculation
+        # self._cached_fill_color = None # Done within _recalculate_colors
+        # self._cached_border_color = (0,0,0,0) # Done within _recalculate_colors
+        # If using dirty rects, changing color requires redrawing the current area.
+        # This logic is now handled by the renderer using previous/current bboxes,
+        # so no direct action needed here based on 'dirty'.
+
+
+    # --- Setters (with validation and invalidation) ---
+    # Each setter validates input, checks if value actually changed (using EPSILON for floats),
+    # updates the value, and invalidates the relevant cache(s).
+
+    def set_position(self, x: float, y: float) -> 'Triangle':
+        """Sets the world position (translation) of the triangle."""
+        try:
+            new_pos = _validate_vertex((x, y), "new position")
+            # Use EPSILON to compare floating point positions reliably
+            if abs(self.position[0] - new_pos[0]) > EPSILON or \
+               abs(self.position[1] - new_pos[1]) > EPSILON:
+                self.position = new_pos
+                self._invalidate_transform() # Position affects transform
+        except (TriangleError, ValueError, TypeError) as e:
+            print(f"Error setting position: {e}") # Log error but don't crash
+        return self # Return self for chaining
+
+    def move(self, dx: float, dy: float) -> 'Triangle':
+        """Moves the triangle by a delta amount (dx, dy)."""
+        try:
+            # Ensure dx, dy are valid finite numbers
+            fdx, fdy = float(dx), float(dy)
+            if not math.isfinite(fdx) or not math.isfinite(fdy):
+                 raise ValueError("Move delta values must be finite.")
+            # Only trigger update if movement is significant
+            if abs(fdx) > EPSILON or abs(fdy) > EPSILON:
+                 # Calculate new position safely before setting
+                 new_x = self.position[0] + fdx
+                 new_y = self.position[1] + fdy
+                 if not math.isfinite(new_x) or not math.isfinite(new_y):
+                      raise ValueError("Movement resulted in non-finite position.")
+                 # Use set_position to handle validation and invalidation
+                 self.set_position(new_x, new_y)
+        except (TriangleError, ValueError, TypeError) as e:
+            print(f"Error moving triangle: {e}")
+        return self
+
+    def set_rotation(self, angle_degrees: float) -> 'Triangle':
+        """Sets the rotation around the pivot in degrees."""
+        try:
+            new_rot = float(angle_degrees)
+            if not math.isfinite(new_rot): raise ValueError("Rotation angle must be finite.")
+            if abs(self.rotation_deg - new_rot) > EPSILON:
+                self.rotation_deg = new_rot
+                self._invalidate_transform() # Rotation affects transform
+        except (ValueError, TypeError) as e:
+             print(f"Error setting rotation: {e}")
+        return self
+
+    def rotate(self, angle_delta_degrees: float) -> 'Triangle':
+        """Rotates the triangle by a delta amount in degrees."""
+        try:
+             delta = float(angle_delta_degrees)
+             if not math.isfinite(delta): raise ValueError("Rotation delta must be finite.")
+             if abs(delta) > EPSILON:
+                  new_rot = self.rotation_deg + delta
+                  # Normalize angle? Optional, Pygame handles large angles fine.
+                  # e.g., new_rot %= 360
+                  if not math.isfinite(new_rot): raise ValueError("Rotation resulted in non-finite angle.")
+                  self.set_rotation(new_rot) # Use setter
+        except (ValueError, TypeError) as e:
+             print(f"Error rotating triangle: {e}")
+        return self
+
+    def set_scale(self, scale_value: ScaleType) -> 'Triangle':
+        """Sets the scale factor(s) around the pivot."""
+        try:
+            new_scale = _validate_scale(scale_value) # Already ensures non-negative, finite
+            # Compare tuples directly (exact comparison needed here)
+            if self.scale != new_scale:
+                self.scale = new_scale
+                self._invalidate_transform() # Scale affects transform
+        except (TriangleError, ValueError, TypeError) as e:
+            print(f"Error setting scale: {e}")
+        return self
+
+    def set_scale_xy(self, scale_x: float, scale_y: float) -> 'Triangle':
+         """Sets separate scale factors for X and Y."""
+         return self.set_scale((scale_x, scale_y)) # Delegate to tuple version
+
+    def rescale(self, factor: float) -> 'Triangle':
+        """Multiplies the current scale factor(s) by a factor."""
+        try:
+             f = float(factor)
+             if not math.isfinite(f) or f < 0: raise ValueError("Rescale factor must be finite and non-negative.")
+             if abs(f - 1.0) > EPSILON: # Only apply if factor changes scale significantly
+                 sx, sy = self.scale
+                 # Check for potential non-finite results *before* setting
+                 new_sx, new_sy = sx * f, sy * f
+                 if not math.isfinite(new_sx) or not math.isfinite(new_sy):
+                      raise ValueError("Rescaling resulted in non-finite scale factors.")
+                 # Use set_scale which handles validation and invalidation
+                 self.set_scale((new_sx, new_sy))
+        except (TriangleError, ValueError, TypeError) as e:
+             print(f"Error rescaling triangle: {e}")
+        return self
+
+
+    def set_skew(self, skew_value: SkewType) -> 'Triangle':
+        """Sets the skew angle(s) in degrees."""
+        try:
+             new_skew = _validate_skew(skew_value) # Ensures finite values
+             # Tuple comparison is fine
+             if self.skew_deg != new_skew:
+                  # Prevent extreme skew angles that might cause float issues with tan()
+                  # Clamp angles slightly away from +/- 90, 270 etc. degrees
+                  clamp_margin = 0.01 # degrees away from problematic values
+                  max_angle = 90.0 - clamp_margin
+                  clamped_sx = max(-max_angle, min(max_angle, new_skew[0]))
+                  clamped_sy = max(-max_angle, min(max_angle, new_skew[1]))
+                  clamped_skew = (clamped_sx, clamped_sy)
+
+                  if self.skew_deg != clamped_skew: # Check again after clamping
+                      self.skew_deg = clamped_skew
+                      self._invalidate_transform() # Skew affects transform
+        except (TriangleError, ValueError, TypeError) as e:
+            print(f"Error setting skew: {e}")
+        return self
+
+    def set_skew_xy(self, skew_x_deg: float, skew_y_deg: float) -> 'Triangle':
+        """Sets separate skew angles for X and Y axes."""
+        return self.set_skew((skew_x_deg, skew_y_deg)) # Delegate
+
+    def skew(self, delta_x_deg: float, delta_y_deg: float) -> 'Triangle':
+        """Applies a delta skew to the current skew angles."""
+        try:
+            dx = float(delta_x_deg)
+            dy = float(delta_y_deg)
+            if not math.isfinite(dx) or not math.isfinite(dy): raise ValueError("Skew deltas must be finite.")
+            if abs(dx) > EPSILON or abs(dy) > EPSILON:
+                 # Calculate new skew safely
+                 current_sx, current_sy = self.skew_deg
+                 new_sx = current_sx + dx
+                 new_sy = current_sy + dy
+                 if not math.isfinite(new_sx) or not math.isfinite(new_sy):
+                      raise ValueError("Skewing resulted in non-finite angles.")
+                 self.set_skew((new_sx, new_sy)) # Use setter for validation/clamping/invalidation
+        except (TriangleError, ValueError, TypeError) as e:
+            print(f"Error applying skew delta: {e}")
+        return self
+
+
+    def set_pivot_offset(self, offset_x: float, offset_y: float) -> 'Triangle':
+        """Sets the pivot offset relative to the geometric center."""
+        try:
+             new_pivot = _validate_vertex((offset_x, offset_y), "pivot_offset")
+             if self.pivot_offset != new_pivot: # Tuple comparison ok
+                  self.pivot_offset = new_pivot
+                  self._invalidate_transform() # Pivot offset change affects transform origin
+        except (TriangleError, ValueError, TypeError) as e:
+             print(f"Error setting pivot offset: {e}")
+        return self
+
+    def set_alpha_multiplier(self, multiplier: float) -> 'Triangle':
+        """Sets the alpha multiplier [0.0, 1.0]."""
+        try:
+             # Clamp and ensure finite float
+             new_alpha_mult = max(0.0, min(1.0, float(multiplier)))
+             if not math.isfinite(new_alpha_mult): raise ValueError("Alpha multiplier must be finite.")
+             if abs(self.alpha_multiplier - new_alpha_mult) > EPSILON:
+                  self.alpha_multiplier = new_alpha_mult
+                  self._invalidate_color() # Affects final cached colors
+        except (ValueError, TypeError) as e:
+            print(f"Error setting alpha multiplier: {e}")
+        return self
+
+    def set_fill_color(self, color: Optional[Union[Tuple[int, int, int], Color]]) -> 'Triangle':
+        """Sets the base fill color (RGB or RGBA)."""
+        try:
+             new_color = _validate_color(color, "fill_color") # Returns RGBA or None
+             if self.fill_color != new_color:
+                  self.fill_color = new_color
+                  self._invalidate_color() # Affects color cache
+        except (TriangleError, ValueError, TypeError) as e:
+             print(f"Error setting fill color: {e}")
+        return self
+
+    def set_border_color(self, color: Optional[Union[Tuple[int, int, int], Color]]) -> 'Triangle':
+        """Sets the base border color (RGB or RGBA)."""
+        try:
+             # Validate, ensuring we get RGBA or default to opaque black if input is None/invalid
+             new_color = _validate_color(color, "border_color") or (0, 0, 0, 255)
+
+             # Check if the color we are *about* to change is the 'original' one
+             is_currently_original = (self._original_border_color == self.border_color)
+
+             if self.border_color != new_color:
+                  self.border_color = new_color
+                  self._invalidate_color() # Affects color cache
+                  # If we just changed the one that was considered the original, update the original store
+                  if is_currently_original:
+                       self._original_border_color = new_color
+        except (TriangleError, ValueError, TypeError) as e:
+            print(f"Error setting border color: {e}")
+        return self
+
+    def set_border_thickness(self, thickness: int) -> 'Triangle':
+        """Sets the border thickness in pixels."""
+        try:
+             new_thickness = max(0, int(thickness)) # Ensure non-negative integer
+             is_currently_original = (self._original_border_thickness == self.border_thickness)
+             if self.border_thickness != new_thickness:
+                  self.border_thickness = new_thickness
+                  # Thickness affects rendering size and bbox calculation
+                  self._invalidate_transform()
+                  # Also potentially invalidate color if thickness goes to/from 0? No, transform is enough.
+                  if is_currently_original:
+                       self._original_border_thickness = new_thickness
+        except (ValueError, TypeError) as e:
+             print(f"Error setting border thickness: {e}")
+        return self
+
+    def set_antialiasing(self, enable: bool) -> 'Triangle':
+        """Enables or disables anti-aliasing (if available)."""
+        new_aa = bool(enable)
+        if self.antialiasing != new_aa:
+             self.antialiasing = new_aa
+             # AA changes rendering appearance within the same bounds primarily
+             # It might slightly affect pixel coverage at edges. Invalidating transform is safest.
+             self._invalidate_transform()
+        return self
+
+    def set_visibility(self, visible: bool) -> 'Triangle':
+        """Sets the visibility of the triangle."""
+        new_vis = bool(visible)
+        if self.visible != new_vis:
+             # Manage bounding boxes for dirty rect handling (even with flip(), useful for state)
+             if not new_vis and self.visible: # --- Becoming Invisible ---
+                 # Ensure transform state is calculated *before* hiding
+                 if self._needs_recalc_transform:
+                     try: self._apply_transforms()
+                     except Exception as e: print(f"Error applying transforms before hiding: {e}")
+                 # Store the last known bounding box (if it exists and is valid)
+                 if self._bounding_box and isinstance(self._bounding_box, pg.Rect):
+                      self._previous_bounding_box = self._bounding_box.copy()
+                 else:
+                      self._previous_bounding_box = None
+                 # Mark internal state as needing no updates while invisible
+                 self._bounding_box = None # No current bounding box
+                 self._transformed_vertices = [] # Clear vertices too
+                 self._transformed_pivot_cache = None
+
+             elif new_vis and not self.visible: # --- Becoming Visible ---
+                 # Needs recalculation on next access/draw
+                 self._needs_recalc_transform = True
+                 self._needs_recalc_color = True
+                 self._previous_bounding_box = None # No meaningful previous location
+
+             # Update visibility flag
+             self.visible = new_vis
+        return self
+
+    # --- Lerp Methods ---
+    def lerp_position(self, target_pos: Vertex, factor: float) -> 'Triangle':
+        """Linearly interpolates position towards a target."""
+        try:
+            target = _validate_vertex(target_pos, "lerp target position")
+            new_pos = _lerp_tuple(self.position, target, factor)
+            # Use set_position which handles checks and invalidation
+            self.set_position(new_pos[0], new_pos[1])
+        except (TriangleError, ValueError, TypeError) as e:
+            print(f"Error during lerp_position: {e}")
+        return self
+
+    def lerp_rotation(self, target_angle_deg: float, factor: float) -> 'Triangle':
+        """Linearly interpolates rotation towards a target angle."""
+        try:
+            target = float(target_angle_deg)
+            if not math.isfinite(target): raise ValueError("Target rotation must be finite.")
+            # NOTE: Simple lerp for angles doesn't handle wrap-around (350deg -> 10deg).
+            # For smooth continuous rotation across 0/360, more complex logic is needed.
+            # Keeping simple lerp for now.
+            new_rot = _lerp(self.rotation_deg, target, factor)
+            self.set_rotation(new_rot) # Setter handles finite check & invalidation
+        except (ValueError, TypeError) as e:
+            print(f"Error during lerp_rotation: {e}")
+        return self
+
+    def lerp_scale(self, target_scale: ScaleType, factor: float) -> 'Triangle':
+        """Linearly interpolates scale towards a target."""
+        try:
+            target = _validate_scale(target_scale) # Target scale (tuple)
+            new_scale = _lerp_tuple(self.scale, target, factor)
+            # Use set_scale for validation and invalidation
+            self.set_scale(new_scale)
+        except (TriangleError, ValueError, TypeError) as e:
+             print(f"Error during lerp_scale: {e}")
+        return self
+
+    def lerp_skew(self, target_skew_deg: SkewType, factor: float) -> 'Triangle':
+        """Linearly interpolates skew towards a target."""
+        try:
+            target = _validate_skew(target_skew_deg) # Target skew (tuple)
+            new_skew = _lerp_tuple(self.skew_deg, target, factor)
+            # Use set_skew for validation, clamping, and invalidation
+            self.set_skew(new_skew)
+        except (TriangleError, ValueError, TypeError) as e:
+            print(f"Error during lerp_skew: {e}")
+        return self
+
+    def lerp_alpha(self, target_multiplier: float, factor: float) -> 'Triangle':
+        """Linearly interpolates alpha multiplier towards a target."""
+        try:
+            target = max(0.0, min(1.0, float(target_multiplier)))
+            if not math.isfinite(target): raise ValueError("Target alpha must be finite.")
+            new_alpha = _lerp(self.alpha_multiplier, target, factor)
+            self.set_alpha_multiplier(new_alpha) # Setter handles checks
+        except (ValueError, TypeError) as e:
+            print(f"Error during lerp_alpha: {e}")
+        return self
+
+
+    # --- Other Methods ---
+    def reset_transform(self) -> 'Triangle':
+        """Resets position, rotation, scale, and skew to default identity values."""
+        changed = False
+        # Use setters to ensure invalidation occurs correctly if any value changes
+        if self.position != (0.0, 0.0): self.set_position(0.0, 0.0); changed = True
+        if abs(self.rotation_deg) > EPSILON: self.set_rotation(0.0); changed = True
+        if self.scale != (1.0, 1.0): self.set_scale(1.0); changed = True
+        if self.skew_deg != (0.0, 0.0): self.set_skew(0.0); changed = True
+        # Pivot offset is NOT reset by default, as it's often intentional user setting.
+        # Use set_pivot_offset(0,0) if that's desired.
+
+        # No explicit invalidation needed here, setters handle it.
+        return self
+
+    def get_bounding_box(self) -> Optional[pg.Rect]:
+        """Returns the current bounding box, calculating if needed. Returns a COPY."""
+        if self._needs_recalc_transform:
+            try:
+                 self._apply_transforms()
+            except Exception as e:
+                 print(f"Error applying transforms in get_bounding_box: {e}")
+                 return None # Return None if transform failed
+        # Return a copy to prevent external modification
+        return self._bounding_box.copy() if self._bounding_box else None
+
+    def get_previous_bounding_box(self) -> Optional[pg.Rect]:
+         """Returns the bounding box from *before* the last transform/visibility change. Returns a COPY."""
+         # Value is managed by _apply_transforms and set_visibility
+         return self._previous_bounding_box.copy() if self._previous_bounding_box else None
+
+
+    def is_point_inside(self, point: Vertex) -> bool:
+        """Checks if a point (world coordinates) is inside the triangle."""
+        if not self.visible: return False # Cannot be inside if not visible
+
+        # Ensure current transform state is calculated
+        if self._needs_recalc_transform:
+            try:
+                self._apply_transforms()
+            except Exception as e:
+                 print(f"Error applying transforms in is_point_inside check: {e}")
+                 return False # Cannot check if transform failed
+
+        # 1. Broad phase check using the bounding box
+        current_bbox = self._bounding_box
+        if not current_bbox: return False # No bbox means cannot be inside
+
+        try:
+            # Validate input point format FIRST
+            px, py = _validate_vertex(point, "is_point_inside check point")
+            # Check if point is within the bounding box (cheap check)
+            if not current_bbox.collidepoint(px, py):
+                 return False
+        except (TriangleError, ValueError, TypeError) as e:
+            print(f"Invalid point format for is_point_inside check: {e}")
+            return False # Invalid input point cannot be inside
+
+        # 2. Narrow phase check using barycentric coordinates
+        #    Need valid transformed vertices for this.
+        if not self._transformed_vertices or len(self._transformed_vertices) < 3:
+            # This should not happen if bbox exists and visible, but safety check
+            # print("Warning: is_point_inside called with invalid transformed_vertices state.")
+            return False
+
+        # Call the helper function with transformed vertices
+        return _is_point_in_triangle_barycentric(px, py, *self._transformed_vertices)
+
+
+# --- Оптимизированный Класс Рендерера ---
+# (Минимальные изменения, в основном добавление логгирования ошибок)
+class TriangleRenderer:
+    _gfx_available = False # Is pygame.gfxdraw importable and has needed functions?
+    _gfx_checked = False # Has the check been performed?
+    _gfx = None # Stores the imported gfxdraw module if available
+
+    def __init__(self):
+        """Checks for pygame.gfxdraw availability on first instantiation."""
+        if not TriangleRenderer._gfx_checked:
+            TriangleRenderer._gfx_checked = True
+            try:
+                # Attempt to import the module
+                TriangleRenderer._gfx = __import__('pygame.gfxdraw')
+                gfx = TriangleRenderer._gfx
+                # Check if necessary functions exist (basic sanity check)
+                if hasattr(gfx, 'aapolygon') and hasattr(gfx, 'filled_polygon') and \
+                   hasattr(gfx, 'polygon') and hasattr(gfx, 'line'): # Added line check
+                     TriangleRenderer._gfx_available = True
+                     # print("[TR] Info: Pygame GFX (AA) available.") # Optional: Logging
+                else:
+                     print("[TR] Warning: Pygame GFX module found, but required drawing functions are missing. AA disabled.")
+                     TriangleRenderer._gfx = None # Don't use if incomplete
+                     TriangleRenderer._gfx_available = False
+            except ImportError:
+                 # print("[TR] Info: pygame.gfxdraw module not found. Anti-aliasing (AA) will be disabled.") # Optional Log
+                 TriangleRenderer._gfx_available = False
+            except Exception as e:
+                 # Catch any other unexpected errors during import/check
+                 print(f"[TR] Warning: Error during pygame.gfxdraw check: {e}. Anti-aliasing (AA) disabled.")
+                 TriangleRenderer._gfx_available = False
+                 TriangleRenderer._gfx = None # Ensure it's None on error
+
+
+    @property
+    def is_aa_available(self) -> bool:
+        """Returns True if anti-aliasing via pygame.gfxdraw is likely available."""
+        return self._gfx_available
+
+    def _draw_single_triangle(self, surface: pg.Surface, triangle: Triangle) -> Optional[pg.Rect]:
+        """
+        Internal helper to draw a single triangle.
+        Returns the bounding box that was drawn onto, or None if nothing drawn/invisible.
+        """
+        # --- Early exit conditions ---
+        if not triangle.visible:
+            return None # Nothing to draw if invisible
+
+        # --- Get necessary triangle state ---
+        # This implicitly triggers _apply_transforms and _recalculate_colors if needed
+        try:
+             # Get properties required for drawing. Accessing them ensures they are calculated.
+             # Need a *copy* of the bbox for returning later.
+             current_bbox = triangle.get_bounding_box() # Ensures transform calc
+             fill_color = triangle.current_fill_color   # Ensures color calc
+             border_color = triangle.current_border_color # Ensures color calc
+             border_thickness = triangle.border_thickness
+             transformed_vertices = triangle.vertices # Should be valid after bbox access
+
+             # Further checks after properties are retrieved
+             if not current_bbox or not transformed_vertices or len(transformed_vertices) < 3:
+                  # This can happen if transform calculation failed inside the property getters
+                  # print(f"Render skip: Invalid state (no bbox/verts) for triangle {triangle.user_data}") # Debug
+                  return None
+             if not fill_color and (border_thickness <= 0 or not border_color):
+                   # Nothing to draw if no fill, no border color or 0 thickness
+                  # print(f"Render skip: No fill/border for triangle {triangle.user_data}") # Debug
+                  return None
+
+        except Exception as e:
+            # Catch errors during property access (which might trigger internal calculations)
+            print(f"Render Error (Property Fetch): Failed getting properties for triangle {triangle.user_data}: {e}")
+            # If we can't get properties, we can't draw. The *previous* area might still need update though.
+            return None # Indicate draw failed
+
+        # --- Prepare for Drawing ---
+        # Convert vertices to integers required by Pygame draw functions
+        # Use round() for potentially better visual results than int() truncation
+        try:
+             int_verts: List[Tuple[int, int]] = [
+                 (int(round(v[0])), int(round(v[1]))) for v in transformed_vertices
+             ]
+        except (ValueError, TypeError) as e:
+             print(f"Render Error: Failed to convert vertices to int for {triangle.user_data}: {e}")
+             return current_bbox # Return bbox even if conversion failed, area likely affected
+
+        # Determine if fill / border drawing is actually needed based on alpha etc.
+        # alpha > 0 needed (alpha=0 means fully transparent)
+        can_fill = fill_color is not None and fill_color[3] > 0
+        can_border = border_thickness > 0 and border_color is not None and border_color[3] > 0
+
+        # Exit if fully transparent / no border
+        if not can_fill and not can_border:
+             return None # Nothing to draw
+
+        # --- Select Drawing Method (AA vs Non-AA) ---
+        # Note: Check _gfx module existence again for safety, though property checks it.
+        use_aa = triangle.antialiasing and self.is_aa_available and self._gfx is not None
+        gfx = self._gfx # Use local alias if using AA
+
+        # --- Perform Drawing Operations ---
+        try:
+            # 1. Fill (if needed)
+            if can_fill:
+                 fc = fill_color # Known to be valid RGBA with alpha > 0 here
+                 if use_aa:
+                     # Use gfxdraw's filled polygon (handles AA internally)
+                     gfx.filled_polygon(surface, int_verts, fc)
+                     # Optional: Draw AA outline in *fill* color for *partially transparent* fills?
+                     # Sometimes helps blending. Test visually if needed. Usually not required.
+                     # if fc[3] < 255: gfx.aapolygon(surface, int_verts, fc)
+                 else:
+                     # Standard non-AA fill using pygame.draw
+                     pg.draw.polygon(surface, fc, int_verts, width=0) # width=0 for fill
+
+            # 2. Border (if needed)
+            if can_border:
+                 bc = border_color # Known valid RGBA, alpha > 0
+                 # Thickness guaranteed > 0
+                 bt = border_thickness
+
+                 if use_aa:
+                     # gfxdraw handles thin (1px) AA borders nicely
+                     gfx.aapolygon(surface, int_verts, bc)
+                     # For thicker borders with AA:
+                     # Using pg.draw.lines over the aapolygon might look ok, but not true AA thickness.
+                     # Multiple offset aapolygon calls are complex.
+                     # Simplest: Just use pg.draw.lines for thickness > 1, even if AA enabled.
+                     if bt > 1:
+                         pg.draw.lines(surface, bc, True, int_verts, width=bt) # 'closed'=True
+                 else:
+                     # Standard non-AA border
+                     pg.draw.lines(surface, bc, True, int_verts, width=bt)
+
+            # --- Return Bounding Box ---
+            # If drawing was attempted (fill or border), return the calculated bbox for dirty rect update.
+            return current_bbox
+
+        except Exception as e:
+             # Catch potential errors during the actual Pygame/GFX draw calls
+             # (e.g., coordinates out of surface bounds, unexpected GFX errors)
+             print(f"Render Error (Draw Call Failed): Triangle {triangle.user_data}, Verts={int_verts}. Error: {e}")
+             # Return the intended bounding box even on failure, as the area might be
+             # partially drawn or corrupted and needs redraw.
+             return current_bbox
+
+
+    def draw_triangles(self, surface: pg.Surface, triangles: Sequence[Triangle]) -> List[pg.Rect]:
+        """
+        Draws a sequence of Triangle objects onto the Pygame surface.
+
+        Manages dirty rectangles: Returns a list containing the current bounding boxes
+        of triangles that were drawn, AND the previous bounding boxes of triangles
+        that moved, changed visibility, or otherwise need their old area cleared.
+
+        Args:
+            surface: The pygame.Surface to draw onto.
+            triangles: A sequence (list, tuple) of Triangle objects.
+
+        Returns:
+            A list of pygame.Rect objects representing areas on the surface that
+            were modified and may need to be updated via pygame.display.update().
+            NOTE: This method is designed for `update()`. If using `flip()`,
+            the returned list is not strictly needed but can be useful for debugging.
+        """
+        # --- Input Validation ---
+        if not isinstance(surface, pg.Surface):
+            # Add a more informative error message if surface is invalid
+            raise TriangleError(f"TriangleRenderer.draw_triangles requires a valid Pygame Surface, got {type(surface)}.")
+        if not isinstance(triangles, (list, tuple)):
+            # Slightly more flexible: allow any Sequence type? Let's stick to list/tuple for now.
+             raise TriangleError("TriangleRenderer.draw_triangles requires a list or tuple of Triangle objects.")
+
+        # --- Initialization ---
+        screen_rect = surface.get_rect() # Used for on-screen checks
+        dirty_rects: List[pg.Rect] = [] # Collect rectangles needing update
+
+        # --- Iterate and Draw Triangles ---
+        for tri in triangles:
+             # Ensure we are dealing with a Triangle object
+            if not isinstance(tri, Triangle):
+                 print(f"Warning: Skipping non-Triangle object in drawing list: {tri}")
+                 continue
+
+            # --- Dirty Rect Management Logic ---
+            # Key idea: We need to update the screen where the triangle *was*
+            # and where it *is now* (if it's visible).
+
+            # 1. Get the previous bounding box *before* any drawing/state changes for this triangle.
+            #    Use the getter which returns a copy or None.
+            prev_bbox: Optional[pg.Rect] = None
+            try:
+                 prev_bbox = tri.get_previous_bounding_box()
+                 # Ensure prev_bbox is a Rect or None
+                 if prev_bbox and not isinstance(prev_bbox, pg.Rect):
+                       print(f"Warning: get_previous_bounding_box returned non-Rect: {prev_bbox}. Treating as None.")
+                       prev_bbox = None
+            except Exception as e:
+                 print(f"Error getting previous bounding box for {tri.user_data}: {e}. Assuming None.")
+                 prev_bbox = None
+
+            # 2. Attempt to draw the triangle if it's visible.
+            current_bbox_if_drawn: Optional[pg.Rect] = None # Holds the current bbox if drawn
+            draw_occurred = False
+
+            if tri.visible:
+                 try:
+                      # This call might trigger internal calculations if needed.
+                      # It returns the bbox that *would* be drawn into if successful.
+                      current_bbox_if_drawn = self._draw_single_triangle(surface, tri)
+
+                      # Ensure it's a Rect or None
+                      if current_bbox_if_drawn and not isinstance(current_bbox_if_drawn, pg.Rect):
+                           print(f"Warning: _draw_single_triangle returned non-Rect: {current_bbox_if_drawn}. Treating as None.")
+                           current_bbox_if_drawn = None
+
+                      if current_bbox_if_drawn:
+                            # Check if the drawing area intersects the screen
+                            if screen_rect.colliderect(current_bbox_if_drawn):
+                                draw_occurred = True
+                                # Add the area that was actually drawn onto the screen
+                                dirty_rects.append(current_bbox_if_drawn)
+                            # else: The triangle was 'drawn' but entirely off-screen.
+                      # else: Draw call returned None (e.g., fully transparent, invalid state)
+
+                 except Exception as e:
+                      # Catch unexpected errors during the draw attempt itself
+                      print(f"Unexpected error during _draw_single_triangle call for {tri.user_data}: {e}")
+                      # Mark draw as failed. prev_bbox might still be needed.
+                      draw_occurred = False # Ensure draw is marked failed
+
+
+            # 3. Add the *previous* bounding box if necessary.
+            #    Needed if the triangle was previously visible on screen and:
+            #    a) is now invisible, OR
+            #    b) failed to draw this frame, OR
+            #    c) drew successfully but might have moved/resized (safest to always add if moved), OR
+            #    d) moved off-screen.
+            if prev_bbox and screen_rect.colliderect(prev_bbox): # Only care if prev area was on screen
+                 # Check conditions a, b, c, d:
+                 needs_prev_update = False
+                 if not tri.visible: needs_prev_update = True # Case a: became invisible
+                 elif not draw_occurred: needs_prev_update = True # Case b: failed to draw
+                 elif current_bbox_if_drawn is None: needs_prev_update = True # Case b (alt check)
+                 else: # Case c/d: drew successfully, still visible
+                     # Add previous area unless it's exactly the same as the current one?
+                     # Comparing Rects can be tricky with floats. Safest is usually to add it.
+                     # Let pygame.display.update merge/handle overlaps if needed.
+                     needs_prev_update = True # Always add prev if it existed & tri could have changed
+
+                 if needs_prev_update:
+                      dirty_rects.append(prev_bbox)
+
+
+        # --- Post-processing Dirty Rects ---
+        # Optional: Remove potential duplicate Rect objects.
+        # This can slightly reduce the list size passed to update(), but update() handles overlaps fine.
+        # Using dict keys for fast uniqueness check (Rects need to be hashable).
+        # Ensure Rects are copied if necessary for dict keys if they were mutable references.
+        try:
+            # Create unique list (important: relies on Rect hashing correctly)
+             unique_rects_dict = {r: True for r in dirty_rects if r is not None} # Filter potential Nones
+             final_dirty_list = list(unique_rects_dict.keys())
+        except TypeError: # If Rects are not hashable for some reason
+             print("Warning: Could not use dict keys for unique rects, returning list with potential duplicates.")
+             final_dirty_list = [r for r in dirty_rects if r is not None] # Just filter None
+
+        # --- Return the List ---
+        return final_dirty_list
+
+
+# --- Фабричные Функции (добавлены type hints и немного robustness) ---
+def create_equilateral(cx: float, cy: float, side: float, **kwargs) -> Triangle:
+    """Creates an equilateral triangle centered approximately at (cx, cy)."""
+    try:
+        s = float(side)
+        if s <= 0: raise ValueError("Side length must be positive.")
+        h = math.sqrt(3) / 2.0 * s # Height
+        r_outer = 2.0 / 3.0 * h   # Distance from center to vertex
+        r_inner = 1.0 / 3.0 * h   # Distance from center to midpoint of side (apothem)
+        # Vertices calculation (relative to center, pointing up)
+        v1 = (cx, cy - r_outer)          # Top vertex
+        v2 = (cx - s / 2.0, cy + r_inner) # Bottom-left vertex
+        v3 = (cx + s / 2.0, cy + r_inner) # Bottom-right vertex
+        return Triangle([v1, v2, v3], **kwargs)
+    except (ValueError, TypeError) as e:
+        raise TriangleError(f"Failed to create equilateral triangle: {e}") from e
+
+def create_isosceles(cx: float, cy: float, base: float, height: float, pointing_up: bool = True, **kwargs) -> Triangle:
+    """Creates an isosceles triangle centered approximately at (cx, cy)."""
+    try:
+        b = float(base)
+        h = float(height)
+        if b <= 0 or h <= 0: raise ValueError("Base and height must be positive.")
+        half_base = b / 2.0
+        half_height = h / 2.0
+        # Determine y-coordinates based on orientation
+        y_base = half_height if pointing_up else -half_height
+        y_tip = -half_height if pointing_up else half_height
+        # Vertices relative to the center (0,0)
+        v1_rel = (-half_base, y_base)
+        v2_rel = (half_base, y_base)
+        v3_rel = (0, y_tip)
+        # Translate relative vertices to the final center (cx, cy)
+        final_verts = [(cx + vx, cy + vy) for vx, vy in [v1_rel, v2_rel, v3_rel]]
+        return Triangle(final_verts, **kwargs)
+    except (ValueError, TypeError) as e:
+        raise TriangleError(f"Failed to create isosceles triangle: {e}") from e
+
+
+def create_right_angle(x_corner: float, y_corner: float, width: float, height: float, corner_pos: str = 'bl', **kwargs) -> Triangle:
+    """Creates a right-angle triangle with the right angle at the specified corner."""
+    try:
+        w = float(width)
+        h = float(height)
+        x = float(x_corner)
+        y = float(y_corner)
+        if w <= 0 or h <= 0: raise ValueError("Width and height must be positive.")
+
+        # Determine vertices based on the corner position
+        # Assumes standard Pygame coordinate system (y increases downwards)
+        if corner_pos == 'bl': # Bottom-Left corner is the right angle
+            v1, v2, v3 = (x, y), (x + w, y), (x, y - h)
+        elif corner_pos == 'br': # Bottom-Right
+            v1, v2, v3 = (x, y), (x - w, y), (x, y - h)
+        elif corner_pos == 'tl': # Top-Left
+            v1, v2, v3 = (x, y), (x + w, y), (x, y + h)
+        elif corner_pos == 'tr': # Top-Right
+            v1, v2, v3 = (x, y), (x - w, y), (x, y + h)
+        else:
+            raise ValueError(f"Invalid corner_pos '{corner_pos}'. Use 'bl', 'br', 'tl', or 'tr'.")
+
+        # The triangle is defined relative to the corner. Position should remain (0,0).
+        return Triangle([v1, v2, v3], position=(0.0, 0.0), **kwargs)
+    except (ValueError, TypeError) as e:
+         raise TriangleError(f"Failed to create right-angle triangle: {e}") from e
+
+
+def create_random_triangle(x_range: Tuple[float, float], y_range: Tuple[float, float], min_dist: float = 10, max_attempts: int = 100, **kwargs) -> Triangle:
+    """Creates a triangle with random vertices within ranges, ensuring minimum side lengths and non-collinearity."""
+    try:
+        min_d = float(min_dist)
+        if min_d < 0: raise ValueError("Minimum distance cannot be negative.")
+        # Validate ranges
+        if not (isinstance(x_range, (tuple,list)) and len(x_range) == 2 and x_range[0] <= x_range[1]):
+            raise ValueError("x_range must be a valid (min, max) tuple/list.")
+        if not (isinstance(y_range, (tuple,list)) and len(y_range) == 2 and y_range[0] <= y_range[1]):
+            raise ValueError("y_range must be a valid (min, max) tuple/list.")
+
+        for attempt in range(max_attempts):
+            # Generate 3 random vertices
+            vertices = [(random.uniform(*x_range), random.uniform(*y_range)) for _ in range(3)]
+            v1, v2, v3 = vertices
+
+            # Check minimum distance between vertices (simple pairwise check)
+            d12 = math.dist(v1, v2)
+            d23 = math.dist(v2, v3)
+            d31 = math.dist(v3, v1)
+
+            if d12 >= min_d and d23 >= min_d and d31 >= min_d:
+                # Check for non-collinearity using area calculation (or cross product)
+                # Area = 0.5 * |x1(y2-y3) + x2(y3-y1) + x3(y1-y2)|
+                area = 0.5 * abs(v1[0]*(v2[1]-v3[1]) + v2[0]*(v3[1]-v1[1]) + v3[0]*(v1[1]-v2[1]))
+                # If area is significantly larger than zero, they are not collinear
+                if area > (min_d * EPSILON): # Scale epsilon slightly by min_dist for robustness
+                     # Found a valid triangle
+                     return Triangle(vertices, **kwargs)
+
+        # If loop finishes without finding a valid triangle
+        raise TriangleError(f"Could not create random triangle meeting criteria after {max_attempts} attempts.")
+    except (ValueError, TypeError) as e:
+        raise TriangleError(f"Failed to create random triangle: {e}") from e
+
+
+def create_star_segment(center_x: float, center_y: float, outer_radius: float, inner_radius: float, num_points: int = 5, segment_index: int = 0, **kwargs) -> Triangle:
+    """Creates a single triangular segment of a star shape."""
+    try:
+        cx, cy = float(center_x), float(center_y)
+        oR, iR = float(outer_radius), float(inner_radius)
+        n = int(num_points)
+        idx = int(segment_index)
+
+        if not (n >= 3): raise ValueError("Number of star points must be at least 3.")
+        if not (0 <= idx < n): raise ValueError(f"Segment index {idx} out of range for {n} points.")
+        if not (0 < iR < oR): raise ValueError("Inner radius must be positive and less than outer radius.")
+
+        step_angle_deg = 360.0 / n
+        half_step_deg = step_angle_deg / 2.0
+
+        # Angles for the three vertices of the segment triangle
+        # Adjust by -90 degrees to start with tip pointing up
+        tip_angle_rad = math.radians(step_angle_deg * idx - 90.0)
+        base1_angle_rad = math.radians(step_angle_deg * idx - 90.0 - half_step_deg)
+        base2_angle_rad = math.radians(step_angle_deg * idx - 90.0 + half_step_deg)
+
+        # Calculate vertex coordinates
+        v_tip = (cx + oR * math.cos(tip_angle_rad), cy + oR * math.sin(tip_angle_rad))
+        v_base1 = (cx + iR * math.cos(base1_angle_rad), cy + iR * math.sin(base1_angle_rad))
+        v_base2 = (cx + iR * math.cos(base2_angle_rad), cy + iR * math.sin(base2_angle_rad))
+
+        return Triangle([v_tip, v_base1, v_base2], **kwargs)
+    except (ValueError, TypeError) as e:
+        raise TriangleError(f"Failed to create star segment: {e}") from e
+
+def create_regular_polygon_segment(center_x: float, center_y: float, radius: float, num_sides: int, segment_index: int = 0, **kwargs) -> Triangle:
+    """Creates a single triangular segment of a regular polygon (from center to one side)."""
+    try:
+        cx, cy = float(center_x), float(center_y)
+        r = float(radius)
+        ns = int(num_sides)
+        idx = int(segment_index)
+
+        if not (ns >= 3): raise ValueError("Number of polygon sides must be at least 3.")
+        if not (0 <= idx < ns): raise ValueError(f"Segment index {idx} out of range for {ns} sides.")
+        if not (r > 0): raise ValueError("Radius must be positive.")
+
+        step_angle_deg = 360.0 / ns
+        # Angles for the two outer vertices of the segment
+        # Adjust by -90 degrees to start with first segment edge roughly horizontal at top
+        angle1_rad = math.radians(step_angle_deg * idx - 90.0)
+        angle2_rad = math.radians(step_angle_deg * (idx + 1) - 90.0) # Next vertex angle
+
+        # Calculate vertices: Center, and two points on the circumference
+        v_center = (cx, cy)
+        v_p1 = (cx + r * math.cos(angle1_rad), cy + r * math.sin(angle1_rad))
+        v_p2 = (cx + r * math.cos(angle2_rad), cy + r * math.sin(angle2_rad))
+
+        return Triangle([v_center, v_p1, v_p2], **kwargs)
+    except (ValueError, TypeError) as e:
+        raise TriangleError(f"Failed to create polygon segment: {e}") from e
+
+
+# --- Демонстрация с исправлениями и повышенной надежностью ---
+if __name__ == "__main__":
+
+    lib_version = "N/A" # Default if not found
+    try:
+         # Try to get version defined at the top of the file
+        if '__version__' in locals() or '__version__' in globals():
+              lib_version = __version__
+    except NameError: pass # Ignore if __version__ is not accessible
+
+    print(f"--- Cool Triangle Library Demo v{lib_version} ---")
+    print("Initializing Pygame...")
+
+    try:
+        pg.init()
+        # Explicitly check modules needed
+        if not pg.display.get_init(): raise RuntimeError("Pygame display module failed to initialize.")
+        pg.font.init()
+        if not pg.font.get_init(): raise RuntimeError("Pygame font module failed to initialize.")
+        print("Pygame initialized successfully.")
+    except RuntimeError as e:
+         print(f"FATAL: Pygame module initialization failed: {e}", file=sys.stderr)
+         sys.exit(1)
+    except Exception as e:
+        print(f"FATAL: Unexpected error during Pygame initialization: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # --- Screen Setup ---
+    SCREEN_WIDTH, SCREEN_HEIGHT = 1000, 750
+    BG_COLOR = (240, 245, 250, 255) # Light grey-blue background
+    WINDOW_FLAGS = pg.RESIZABLE | pg.SRCALPHA # Resizable window, supports per-pixel alpha
+
+    screen: Optional[pg.Surface] = None # Initialize screen variable
+    try:
+        print(f"Setting display mode: {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
+        screen = pg.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), WINDOW_FLAGS)
+        pg.display.set_caption(f"Cool TL v{lib_version} Demo (Flip, Robust)")
+        print("Display mode set.")
+    except pg.error as e:
+        print(f"FATAL: Could not set display mode: {e}", file=sys.stderr)
+        if pg.get_init(): pg.quit()
+        sys.exit(1)
+    except Exception as e: # Catch other unexpected errors
+        print(f"FATAL: Unexpected error setting display mode: {e}", file=sys.stderr)
+        if pg.get_init(): pg.quit()
+        sys.exit(1)
+
+
+    # --- Demo Setup ---
+    clock = pg.time.Clock()
+    try:
+         renderer = TriangleRenderer() # Initialize our triangle renderer
+         print(f"TriangleRenderer created. AA Available: {renderer.is_aa_available}")
+    except Exception as e:
+        print(f"FATAL: Failed to create TriangleRenderer: {e}", file=sys.stderr)
+        pg.quit()
+        sys.exit(1)
+
+    my_triangles: List[Triangle] = []
+    selected_triangle: Optional[Triangle] = None
+    hovered_triangle: Optional[Triangle] = None
+
+    # Font loading with fallback
+    font: Optional[pg.font.Font] = None
+    try:
+        font = pg.font.SysFont("Arial", 16) # Try loading Arial
+        print("Arial font loaded.")
+    except Exception as e_arial:
+        print(f"Warning: Failed to load Arial font ({e_arial}). Falling back to default.")
+        try:
+            font = pg.font.Font(None, 20) # Pygame's default font
+            if not font: raise RuntimeError("Default font returned None.")
+            print("Using Pygame default font.")
+        except Exception as e_default:
+            print(f"FATAL: Failed to load default font: {e_default}", file=sys.stderr)
+            pg.quit()
+            sys.exit(1)
+
+    # --- Create Demo Triangles ---
+    print("Creating demo triangles...")
+    try:
+        # Using more descriptive user_data dictionaries
+        t1 = create_equilateral(150, 150, 100,
+                                fill_color=(210, 50, 50, 200), border_thickness=2,
+                                pivot_offset=(-10, -10), user_data={"id": "t1", "shape": "Equilateral", "anim": "spin"})
+        t2 = create_isosceles(400, 180, 160, 90, pointing_up=False,
+                                fill_color=(50, 190, 50, 255), border_color=(10, 50, 10, 255),
+                                border_thickness=3, user_data={"id": "t2", "shape": "Isosceles", "anim": "scale_skew"})
+        t3 = create_right_angle(650, 150, 140, 180, corner_pos='tl',
+                                fill_color=(50, 80, 210, 160), border_color=(10, 10, 70, 255),
+                                border_thickness=2, antialiasing=False, user_data={"id": "t3", "shape": "Right", "anim": "pulse"})
+        t4 = create_random_triangle((50, 250), (350, 550), min_dist=40,
+                                fill_color=(230, 180, 40, 220), border_thickness=1,
+                                skew_deg=(25, 0), user_data={"id": "t4", "shape": "Random"})
+        # Star segment with calculated pivot to place tip at center initially
+        star_cx, star_cy, star_or, star_ir = 450, 450, 90, 35
+        star_seg_verts = create_star_segment(0,0, star_or, star_ir, num_points=7, segment_index=0).vertices_orig # Create centered at 0,0 to get vertices easily
+        gc_star = Triangle(star_seg_verts).geometric_center # Calc geom center of segment at 0,0
+        pivot_for_tip = (star_seg_verts[0][0] - gc_star[0], star_seg_verts[0][1] - gc_star[1]) # Offset needed to pivot at tip
+        t5 = Triangle(star_seg_verts, # Use vertices centered at 0,0
+                      position=(star_cx, star_cy), # Move the whole thing to the desired spot
+                      fill_color=(160, 50, 200, 255), border_color=(40, 10, 60, 255),
+                      pivot_offset=pivot_for_tip, # Set pivot relative to center
+                      user_data={"id": "t5", "shape": "StarSeg", "anim": "star"})
+        t6 = create_regular_polygon_segment(750, 400, 70, num_sides=6, segment_index=2,
+                                           fill_color=(40, 160, 170, 200), border_thickness=2,
+                                           user_data={"id": "t6", "shape": "HexSeg", "anim": "wobble"})
+        t7 = Triangle([(0,-10), (-8,8), (8,8)], # Small simple triangle
+                      position=(SCREEN_WIDTH - 50, SCREEN_HEIGHT - 100), # Start near bottom right
+                      fill_color=(255, 90, 160, 255), border_thickness=1,
+                      user_data={"id": "t7", "shape": "Cloner", "anim": "float"})
+
+        my_triangles.extend([t1, t2, t3, t4, t5, t6, t7])
+        selected_triangle = t1 # Pre-select the first one
+        print(f"Created {len(my_triangles)} triangles.")
+
+    except (TriangleError, ValueError, TypeError) as e:
+        print(f"FATAL: Error creating initial triangles: {e}", file=sys.stderr)
+        pg.quit()
+        sys.exit(1)
+    except Exception as e: # Catch other unexpected errors during creation
+        print(f"FATAL: Unexpected error during triangle creation: {e}", file=sys.stderr)
+        pg.quit()
+        sys.exit(1)
+
+
+    # --- Demo Parameters & State ---
+    anim_time = 0.0
+    HOVER_C: Color = (255, 140, 0, 255)    # Hover border color: Orange
+    SELECT_C: Color = (0, 150, 255, 255)   # Selected border color: Blue
+    SELECT_T_INC = 2                      # Border thickness increase for select/hover (reduced slightly)
+    SKEW_SPD = 50.0                       # Skew speed in degrees per second
+    LERP_F = 0.20                         # Lerp factor [0.0 - 1.0] (higher = faster interpolation)
+
+
+    # --- Animation Functions (with error handling) ---
+    def anim_spin(t, dt):
+         if not isinstance(t, Triangle): return
+         try: t.rotate(75 * dt)
+         except Exception as e: print(f"Anim Error (spin) on {t.user_data}: {e}")
+
+    def anim_scale_skew(t, dt, tm):
+         if not isinstance(t, Triangle): return
+         try:
+             sx = 1.0 + math.sin(tm * 1.8) * 0.5 # Scale X between 0.5 and 1.5
+             sy = 1.0 + math.cos(tm * 2.4) * 0.4 # Scale Y between 0.6 and 1.4
+             t.set_scale_xy(sx, sy)
+             # Skew Y based on time, keep existing X skew
+             current_skew_x = t.skew_deg[0]
+             skew_y = math.sin(tm * 1.5) * 25 # Skew Y between -25 and 25 degrees
+             t.set_skew_xy(current_skew_x, skew_y)
+         except Exception as e: print(f"Anim Error (scale_skew) on {t.user_data}: {e}")
+
+    def anim_pulse(t, dt, tm):
+        if not isinstance(t, Triangle): return
+        try:
+            # Pulse alpha multiplier between ~0.6 and ~1.0
+            alpha = 0.8 + math.sin(tm * 3.0) * 0.2
+            t.set_alpha_multiplier(alpha)
+        except Exception as e: print(f"Anim Error (pulse) on {t.user_data}: {e}")
+
+    def anim_star(t, dt):
+        if not isinstance(t, Triangle): return
+        try: t.rotate(-50 * dt) # Rotate star segment
+        except Exception as e: print(f"Anim Error (star) on {t.user_data}: {e}")
+
+    def anim_wobble(t, dt, tm):
+        if not isinstance(t, Triangle): return
+        try:
+            dx = math.sin(tm * 1.2) * 80 * dt # Horizontal wobble based on time
+            t.move(dx, 0)
+        except Exception as e: print(f"Anim Error (wobble) on {t.user_data}: {e}")
+
+    def anim_float(t, dt, screen_h, reset_x_range):
+        if not isinstance(t, Triangle): return
+        try:
+            t.move(0, -35 * dt) # Float upwards
+            # If moved above the top edge (with some margin)
+            if t.position[1] < -50:
+                # Reset position to just below the screen at a random X position
+                nx = random.uniform(*reset_x_range)
+                t.set_position(nx, screen_h + 50)
+        except Exception as e: print(f"Anim Error (float) on {t.user_data}: {e}")
+
+
+    # --- Main Loop ---
+    print("Starting main loop...")
+    running = True
+    frame_count = 0
+    last_error_print_time = 0
+
+    while running:
+        try: # Overall loop error catcher
+            # --- Timing ---
+            # Get delta time, limit max step to prevent large jumps on lag
+            dt = min(clock.tick(60) / 1000.0, 0.1)
+            anim_time += dt
+            frame_count += 1
+
+            # --- Input ---
+            mouse_pos = pg.mouse.get_pos()
+            keys_pressed = pg.key.get_pressed() # Use a snapshot for the frame
+
+            # --- Event Handling ---
+            # Use try-except within event handling for robustness
+            try:
+                for event in pg.event.get():
+                    if event.type == pg.QUIT:
+                        running = False
+                        print("QUIT event received.")
+
+                    # --- Window Resizing ---
+                    elif event.type == pg.VIDEORESIZE:
+                        try:
+                            old_w, old_h = SCREEN_WIDTH, SCREEN_HEIGHT
+                            # Pygame docs recommend creating a new surface on resize
+                            screen = pg.display.set_mode(event.size, WINDOW_FLAGS)
+                            SCREEN_WIDTH, SCREEN_HEIGHT = screen.get_size() # Get actual size
+                            print(f"Window resized from {old_w}x{old_h} to {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
+                            # Optional: Force a full redraw immediately
+                            # screen.fill(BG_COLOR) # Clear new surface
+                            # Render scene? Maybe too slow here. Let main loop handle.
+                        except pg.error as e:
+                             print(f"ERROR during window resize: {e}. Attempting to continue.")
+                             # Optionally try to revert to old size or just hope for the best
+                             # If it fails consistently, maybe set running = False
+                        except Exception as e:
+                            print(f"Unexpected ERROR during window resize: {e}")
+                            running = False # Critical error if resize breaks
+
+                    # --- Keyboard Input ---
+                    elif event.type == pg.KEYDOWN:
+                        if event.key == pg.K_ESCAPE:
+                             running = False
+                             print("Escape key pressed.")
+                        elif event.key == pg.K_SPACE and selected_triangle:
+                            # Clone Selected Triangle
+                            try:
+                                clone = selected_triangle.clone()
+                                clone.move(random.uniform(-30, 30), random.uniform(-30, 30))
+                                # Safe append: create new list or append carefully
+                                my_triangles.append(clone) # Appending is generally safe outside iteration
+                                selected_triangle = clone # Select the new clone
+                                print(f"Cloned triangle {selected_triangle.user_data}, total: {len(my_triangles)}")
+                                # pg.time.wait(5) # Optional small delay
+                            except (TriangleError, ValueError, TypeError, copy.Error) as e:
+                                print(f"Cloning failed for {selected_triangle.user_data}: {e}")
+                            except Exception as e: print(f"Unexpected Clone Error: {e}")
+
+                        elif event.key == pg.K_a and selected_triangle:
+                            # Toggle AA for selected
+                            try:
+                                new_aa = not selected_triangle.antialiasing
+                                selected_triangle.set_antialiasing(new_aa)
+                                print(f"AA for {selected_triangle.user_data} set to {new_aa}")
+                            except Exception as e: print(f"Error setting AA for {selected_triangle.user_data}: {e}")
+
+                        elif event.key == pg.K_v:
+                             # Toggle Visibility (Selected or first invisible)
+                             target_vis_toggle = selected_triangle
+                             if not target_vis_toggle:
+                                target_vis_toggle = next((t for t in my_triangles if not t.visible), None)
+                             if target_vis_toggle:
+                                try:
+                                     new_vis = not target_vis_toggle.visible
+                                     target_vis_toggle.set_visibility(new_vis)
+                                     print(f"Visibility for {target_vis_toggle.user_data} set to {new_vis}")
+                                except Exception as e: print(f"Error setting visibility for {target_vis_toggle.user_data}: {e}")
+
+                        elif event.key == pg.K_r and selected_triangle:
+                             # Reset Transform for Selected
+                             try:
+                                selected_triangle.reset_transform()
+                                print(f"Reset transform for {selected_triangle.user_data}")
+                             except Exception as e: print(f"Error resetting transform for {selected_triangle.user_data}: {e}")
+
+                        elif event.key == pg.K_DELETE and selected_triangle:
+                             # Delete Selected Triangle
+                             try:
+                                print(f"Deleting triangle {selected_triangle.user_data}")
+                                temp_selected = selected_triangle # Store ref before removal
+                                my_triangles.remove(temp_selected) # Use remove on the list
+                                selected_triangle = None # De-select
+                                hovered_triangle = None # Clear hover as well
+                                print(f"Triangle deleted, total: {len(my_triangles)}")
+                             except ValueError:
+                                # Should not happen if selected_triangle is in list, but handle anyway
+                                print(f"Warning: Tried to delete triangle, but it was not found in list.")
+                                selected_triangle = None # Ensure deselection
+                             except Exception as e: print(f"Error deleting triangle: {e}")
+
+
+                    # --- Mouse Input ---
+                    elif event.type == pg.MOUSEBUTTONDOWN:
+                         if event.button == 1: # Left Click
+                             # Select Triangle / Set Pivot
+                             clicked_tri = next((t for t in reversed(my_triangles) if t.visible and t.is_point_inside(event.pos)), None)
+
+                             if clicked_tri: # Clicked on a triangle
+                                  selected_triangle = clicked_tri # Select it
+                                  print(f"Selected triangle: {selected_triangle.user_data}")
+                                  # Set Pivot to click location
+                                  try:
+                                      # Pivot offset is difference between click (world) and transformed center (world)
+                                      geom_center = selected_triangle.geometric_center # Local center
+                                      world_pos = selected_triangle.position
+                                      # Approximate transformed center for pivot calculation (less accurate but often sufficient)
+                                      # TODO: Could calculate precise transformed center for accuracy? Maybe not needed for visual pivot set.
+                                      # Simpler: Use transformed_pivot as ref? No, that uses the offset itself. Use geom + pos.
+                                      center_world_x = geom_center[0] + world_pos[0]
+                                      center_world_y = geom_center[1] + world_pos[1]
+
+                                      # Click pos relative to untransformed geom center in world coords
+                                      pivot_offset_x = event.pos[0] - center_world_x
+                                      pivot_offset_y = event.pos[1] - center_world_y
+                                      selected_triangle.set_pivot_offset(pivot_offset_x, pivot_offset_y)
+                                      print(f"Set pivot offset for {selected_triangle.user_data} to ({pivot_offset_x:.1f}, {pivot_offset_y:.1f})")
+                                  except (TriangleError, ValueError, TypeError) as e: print(f"Error setting pivot offset for {selected_triangle.user_data}: {e}")
+                                  except Exception as e: print(f"Unexpected Pivot Offset Error: {e}")
+                             else: # Clicked on empty space
+                                  if selected_triangle: print("Deselected triangle.")
+                                  selected_triangle = None # Deselect
+
+                    elif event.type == pg.MOUSEWHEEL and selected_triangle:
+                        # Scale Selected Triangle with Wheel + Modifiers
+                         scale_factor = 1.1 if event.y > 0 else (1.0 / 1.1) # Adjusted for slightly slower scaling
+                         shift_held = keys_pressed[pg.K_LSHIFT] or keys_pressed[pg.K_RSHIFT]
+                         ctrl_held = keys_pressed[pg.K_LCTRL] or keys_pressed[pg.K_RCTRL]
+                         try:
+                            sx, sy = selected_triangle.scale
+                            if shift_held: selected_triangle.set_scale_xy(sx * scale_factor, sy) # X only
+                            elif ctrl_held: selected_triangle.set_scale_xy(sx, sy * scale_factor) # Y only
+                            else: selected_triangle.rescale(scale_factor) # Uniform
+                         except (TriangleError, ValueError, TypeError) as e: print(f"Error scaling {selected_triangle.user_data}: {e}")
+                         except Exception as e: print(f"Unexpected Scaling Error: {e}")
+
+
+            except Exception as e: # Catch errors in the event handling loop itself
+                current_time = time.time()
+                 # Avoid flooding console with the same error
+                if current_time - last_error_print_time > 1.0:
+                    print(f"ERROR during event handling: {e}", file=sys.stderr)
+                    last_error_print_time = current_time
+
+
+            # --- Update State (Animations, Interactions) ---
+            try: # Use try-except for update logic
+                 # Apply animations based on user_data or type (careful with deleted tris)
+                 # This relies on t1, t2 etc variables existing and being in the list.
+                 # A more robust way might iterate my_triangles and check user_data["anim"].
+                tris_to_anim = {t.user_data.get("id"): t for t in my_triangles if isinstance(t.user_data, dict) and t.user_data.get("id")}
+
+                if "t1" in tris_to_anim: anim_spin(tris_to_anim["t1"], dt)
+                if "t2" in tris_to_anim: anim_scale_skew(tris_to_anim["t2"], dt, anim_time)
+                if "t3" in tris_to_anim: anim_pulse(tris_to_anim["t3"], dt, anim_time)
+                if "t5" in tris_to_anim: anim_star(tris_to_anim["t5"], dt)
+                if "t6" in tris_to_anim: anim_wobble(tris_to_anim["t6"], dt, anim_time)
+                if "t7" in tris_to_anim: anim_float(tris_to_anim["t7"], dt, SCREEN_HEIGHT, (SCREEN_WIDTH * 0.7, SCREEN_WIDTH - 30))
+
+                # Apply skew based on keyboard input (Ctrl + Arrows)
+                if selected_triangle and (keys_pressed[pg.K_LCTRL] or keys_pressed[pg.K_RCTRL]):
+                    delta_sx, delta_sy = 0.0, 0.0
+                    skew_amount = SKEW_SPD * dt
+                    if keys_pressed[pg.K_LEFT]: delta_sx -= skew_amount
+                    if keys_pressed[pg.K_RIGHT]: delta_sx += skew_amount
+                    if keys_pressed[pg.K_UP]: delta_sy -= skew_amount # Skew Y 'up' visually
+                    if keys_pressed[pg.K_DOWN]: delta_sy += skew_amount # Skew Y 'down' visually
+                    if abs(delta_sx) > EPSILON or abs(delta_sy) > EPSILON:
+                        try: selected_triangle.skew(delta_sx, delta_sy)
+                        except Exception as e: print(f"Error applying keyboard skew: {e}")
+
+
+                # --- Hover and Selection Feedback (Lerping Border) ---
+                # Update hover state (find topmost visible triangle under mouse)
+                # Needs to check against the current list *after* potential deletions
+                hovered_triangle = next((t for t in reversed(my_triangles) if t.visible and t.is_point_inside(mouse_pos)), None)
+
+                # Iterate safely over a copy if deletions/additions mid-frame were possible, but here they are handled before this block.
+                for tri in my_triangles:
+                    is_selected = (tri is selected_triangle)
+                    is_hovered = (tri is hovered_triangle)
+
+                    target_color = tri._original_border_color # Start with original state
+                    target_thickness = float(tri._original_border_thickness)
+
+                    if is_selected and tri.visible: # Apply selection style if visible
+                        target_color = SELECT_C
+                        target_thickness += SELECT_T_INC
+
+                    if is_hovered and tri.visible: # Apply hover style (overrides select color if both)
+                         target_color = HOVER_C
+                         if not is_selected: # Add thickness bump only if not already selected
+                             target_thickness += SELECT_T_INC
+
+                    # Perform interpolation towards target style using Lerp
+                    # Need current values *before* potentially setting them
+                    current_border_c = tri.current_border_color
+                    current_border_t = float(tri.border_thickness)
+
+                    try: # Add try block for lerp operations
+                         lerped_color = _lerp_color(current_border_c, target_color, LERP_F)
+                         lerped_thickness = _lerp(current_border_t, target_thickness, LERP_F)
+
+                         # Apply the lerped values using setters
+                         # Setters handle internal state checks (no change -> no invalidate)
+                         tri.set_border_color(lerped_color)
+                         # Ensure thickness is integer for drawing functions
+                         tri.set_border_thickness(int(round(lerped_thickness)))
+                    except Exception as e:
+                        print(f"Error lerping style for {tri.user_data}: {e}")
+                        # Continue with next triangle
+
+
+            except Exception as e: # Catch errors during the update logic
+                current_time = time.time()
+                if current_time - last_error_print_time > 1.0:
+                     print(f"ERROR during state update: {e}", file=sys.stderr)
+                     last_error_print_time = current_time
+
+            # --- Drawing ---
+            try: # Use try-except for drawing logic
+                 # 1. Clear the screen **completely**
+                 if screen: # Ensure screen exists
+                     screen.fill(BG_COLOR)
+                 else:
+                      # This should not happen if init was successful
+                      print("ERROR: Screen surface is not available for drawing!", file=sys.stderr)
+                      running = False; continue # Exit loop if screen lost
+
+                 # 2. Render all triangles
+                 #   Call the renderer. It handles visibility checks and drawing logic.
+                 #   The returned dirty rect list is not needed when using flip().
+                 if renderer: # Ensure renderer exists
+                    renderer.draw_triangles(screen, my_triangles)
+                 else:
+                      print("ERROR: Renderer not available!", file=sys.stderr)
+                      running = False; continue
+
+                 # 3. Draw UI / Debug Info (on top)
+                 if font: # Check if font loaded successfully
+                    text_y_start = 10
+                    line_height = 18
+                    info_col = (30, 30, 30) # Dark text color
+
+                    # --- General Info ---
+                    lines_to_render = [
+                        f"Triangles: {len(my_triangles)}",
+                        f"FPS: {clock.get_fps():.1f}",
+                        f"Screen: {SCREEN_WIDTH}x{SCREEN_HEIGHT}",
+                        f"Renderer AA: {'Available' if renderer.is_aa_available else 'N/A'}"
+                    ]
+
+                    # --- Selection Info ---
+                    if selected_triangle:
+                         sel_data = selected_triangle.user_data or {}
+                         sel_name = sel_data.get('id', 'N/A') if isinstance(sel_data, dict) else str(sel_data)
+                         lines_to_render.append("-" * 10)
+                         lines_to_render.append(f"Selected: {sel_name} (Vis: {selected_triangle.visible}, AA: {selected_triangle.antialiasing})")
+                         pos = selected_triangle.position
+                         lines_to_render.append(f" Pos: ({pos[0]:.1f}, {pos[1]:.1f}) Rot: {selected_triangle.rotation_deg:.1f}d")
+                         scl = selected_triangle.scale
+                         skw = selected_triangle.skew_deg
+                         lines_to_render.append(f" Scale: ({scl[0]:.2f}, {scl[1]:.2f}) Skew: ({skw[0]:.1f}, {skw[1]:.1f})")
+                         pivot = selected_triangle.transformed_pivot
+                         pivot_str = f"({pivot[0]:.1f},{pivot[1]:.1f})" if pivot else "N/A"
+                         pivot_off = selected_triangle.pivot_offset
+                         lines_to_render.append(f" Pivot Off: ({pivot_off[0]:.1f},{pivot_off[1]:.1f}) Pivot World: {pivot_str}")
+                    else:
+                         lines_to_render.append("-" * 10)
+                         lines_to_render.append("No selection (Click to select/set pivot)")
+
+                    # --- Controls ---
+                    lines_to_render.append("-" * 10)
+                    lines_to_render.append("[Esc]Quit [Spc]Clone [Del]Delete [A]AA [V]Vis [R]Reset")
+                    lines_to_render.append("[Wheel/Mod]Scale [Ctrl+Arrows]Skew")
+
+                    # --- Render Text Lines ---
+                    current_y = text_y_start
+                    for line in lines_to_render:
+                         try:
+                              text_surf = font.render(line, True, info_col)
+                              screen.blit(text_surf, (10, current_y))
+                              current_y += line_height
+                         except pg.error as e_render: print(f"Font rendering error: {e_render}. Line: '{line}'") ; break # Stop text on error
+                         except Exception as e_text: print(f"Unexpected Text Blit Error: {e_text}") ; break
+
+                    # --- Draw Pivot Marker for Selected Triangle ---
+                    if selected_triangle and selected_triangle.visible:
+                         pivot_pos = selected_triangle.transformed_pivot
+                         if pivot_pos and all(map(math.isfinite, pivot_pos)): # Check finite
+                             try:
+                                  ppx, ppy = int(round(pivot_pos[0])), int(round(pivot_pos[1]))
+                                  radius = 6
+                                  pivot_col = (255, 0, 255, 200) # Magenta
+                                  # Draw circle and crosshairs (check if coords are on screen?)
+                                  if screen.get_rect().collidepoint(ppx,ppy):
+                                       pg.draw.circle(screen, pivot_col, (ppx, ppy), radius, 1)
+                                       pg.draw.line(screen, pivot_col, (ppx - radius, ppy), (ppx + radius, ppy), 1)
+                                       pg.draw.line(screen, pivot_col, (ppx, ppy - radius), (ppx, ppy + radius), 1)
+                             except Exception as e_pivot: print(f"Error drawing pivot marker: {e_pivot}")
+
+                 else:
+                      # Fallback if font is somehow None (shouldn't happen with init checks)
+                       if frame_count % 60 == 0: # Print error periodically
+                           print("ERROR: Font not available for drawing UI.", file=sys.stderr)
+
+            except Exception as e: # Catch errors during the drawing phase
+                current_time = time.time()
+                if current_time - last_error_print_time > 1.0:
+                     print(f"ERROR during drawing: {e}", file=sys.stderr)
+                     last_error_print_time = current_time
+
+
+            # --- Update Display ---
+            # Use pg.display.flip() to update the entire screen surface.
+            # This is simpler and avoids potential issues with incomplete dirty rect lists
+            # when the whole background is redrawn anyway.
+            try:
+                 pg.display.flip()
+            except pg.error as e_flip:
+                 # This might happen if display is closed or becomes invalid
+                 print(f"ERROR during display flip: {e_flip}", file=sys.stderr)
+                 running = False # Stop loop if display fails
+                 break
+
+        # --- End of Main Loop Try ---
+        except Exception as loop_error: # Catch unexpected errors in the main loop body
+            current_time = time.time()
+            if current_time - last_error_print_time > 1.0:
+                 print(f"FATAL ERROR in main loop: {loop_error}", file=sys.stderr)
+                 last_error_print_time = current_time
+            # Consider breaking the loop on major errors
+            # running = False # Optionally stop the loop on any major error
+
+
+    # --- Cleanup ---
+    print("Exiting main loop.")
+    final_tri_count = len(my_triangles) # Get count before potential quit issues
+    try:
+        print("Quitting Pygame...")
+        pg.quit()
+        print("Pygame quit successfully.")
+    except Exception as e:
+        print(f"Error during Pygame quit: {e}", file=sys.stderr)
+
+    print(f"Demo finished ({final_tri_count} triangles final count).")
+    sys.exit(0) # Explicit clean exit
