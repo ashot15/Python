@@ -1,0 +1,197 @@
+# main.py
+import os
+import platform
+import subprocess
+import logging
+import shutil # Needed for shutil.which in Linux resolution detection
+
+# --- Import functions from other files ---
+from generator import generate_random_image # <<< CORRECTED FILENAME
+from wallpaper_setter import set_wallpaper
+# --- End Imports ---
+
+# Optional: To try and get screen dimensions
+try:
+    import ctypes # For windows screen size
+except ImportError:
+    ctypes = None # type: ignore
+
+# Configure logging for main script (optional, but good practice)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] %(message)s')
+logger = logging.getLogger('main') # Use a specific logger name
+
+
+def get_screen_resolution():
+    """Tries to detect the main screen resolution."""
+    system = platform.system()
+    try:
+        if system == "Windows" and ctypes:
+            user32 = ctypes.windll.user32
+            try:
+                # SetProcessDPIAware only exists in Windows Vista+
+                if hasattr(user32, 'SetProcessDPIAware'):
+                     user32.SetProcessDPIAware()
+            except Exception as dpi_e:
+                 logger.warning(f"Could not set DPI awareness: {dpi_e}")
+            width = user32.GetSystemMetrics(0) # SM_CXSCREEN
+            height = user32.GetSystemMetrics(1) # SM_CYSCREEN
+            if width > 0 and height > 0:
+                 logger.info(f"Detected Windows screen resolution: {width}x{height}")
+                 return width, height
+            else:
+                 logger.warning("GetSystemMetrics returned non-positive dimensions.")
+                 return None
+        elif system == "Darwin": # macOS
+             logger.info("Attempting macOS resolution detection via system_profiler...")
+             if not shutil.which("system_profiler"):
+                  logger.warning("system_profiler command not found. Cannot detect macOS resolution.")
+                  return None
+             cmd = ['system_profiler', 'SPDisplaysDataType']
+             process = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False, encoding='utf-8')
+             if process.returncode == 0:
+                  output = process.stdout
+                  for line in output.splitlines():
+                       line_stripped = line.strip()
+                       if line_stripped.startswith('Resolution:'):
+                            parts = line_stripped.split()
+                            if len(parts) >= 2 and 'x' in parts[1]:
+                                 res = parts[1].split('x')
+                                 try:
+                                      width, height = int(res[0]), int(res[1])
+                                      logger.info(f"Detected macOS screen resolution: {width}x{height}")
+                                      return width, height
+                                 except ValueError:
+                                      logger.warning(f"Could not parse resolution numbers from: {parts[1]}")
+                                      continue
+                  logger.warning("Could not parse macOS screen resolution from system_profiler output.")
+                  return None
+             else:
+                  logger.error(f"system_profiler command failed. Stderr: {process.stderr}")
+                  return None
+
+        elif system == "Linux":
+             logger.info("Attempting Linux resolution detection via xrandr...")
+             if shutil.which("xrandr"):
+                  cmd = ['xrandr']
+                  process = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False, encoding='utf-8')
+                  if process.returncode == 0:
+                       output = process.stdout
+                       import re
+                       current_match = re.search(r'current\s+(\d+)\s+x\s+(\d+)', output)
+                       primary_match = re.search(r'(\d+)x(\d+)\s+.*\s+\*\+', output)
+
+                       if current_match:
+                            width, height = int(current_match.group(1)), int(current_match.group(2))
+                            logger.info(f"Detected Linux screen resolution (current): {width}x{height}")
+                            return width, height
+                       elif primary_match:
+                            width, height = int(primary_match.group(1)), int(primary_match.group(2))
+                            logger.info(f"Detected Linux screen resolution (primary *+): {width}x{height}")
+                            return width, height
+                       else:
+                            first_res_match = re.search(r'(\d+)x(\d+)', output)
+                            if first_res_match:
+                                 width, height = int(first_res_match.group(1)), int(first_res_match.group(2))
+                                 logger.warning(f"Could not find current/primary marker, using first found resolution: {width}x{height}")
+                                 return width, height
+
+                       logger.warning("Could not parse Linux screen resolution from xrandr output.")
+                       return None
+                  else:
+                       logger.error(f"xrandr command failed. Stderr: {process.stderr}")
+                       return None
+             else:
+                  logger.warning("xrandr command not found. Cannot detect Linux resolution.")
+                  return None
+        else:
+            logger.warning(f"Screen resolution detection not implemented for {system}, using default.")
+            return None
+    except FileNotFoundError as e:
+         logger.error(f"Command for resolution detection not found: {e}. Using default.")
+         return None
+    except subprocess.TimeoutExpired:
+         logger.error("Timeout expired while detecting screen resolution. Using default.")
+         return None
+    except Exception as e:
+        logger.error(f"Error detecting screen resolution: {e}. Using default.", exc_info=True)
+        return None
+
+# --- Configuration ---
+logger.info("Detecting screen resolution...")
+screen_size = get_screen_resolution()
+
+DEFAULT_WIDTH = 1920
+DEFAULT_HEIGHT = 1080
+
+IMAGE_WIDTH = screen_size[0] if screen_size else DEFAULT_WIDTH
+IMAGE_HEIGHT = screen_size[1] if screen_size else DEFAULT_HEIGHT
+IMAGE_FILENAME = "random_desktop_background.png"
+
+SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+IMAGE_SAVE_PATH = os.path.join(SCRIPT_DIRECTORY, IMAGE_FILENAME)
+
+logger.info(f"Using image dimensions: {IMAGE_WIDTH}x{IMAGE_HEIGHT}")
+logger.info(f"Image will be saved to: {IMAGE_SAVE_PATH}")
+# --- End Configuration ---
+
+def run_wallpaper_update():
+    """Generates the image and sets it as wallpaper."""
+    logger.info("--- Starting Random Wallpaper Generator ---")
+
+    generated_path = None
+    try:
+        # 1. Generate the random image
+        generated_path = generate_random_image(IMAGE_WIDTH, IMAGE_HEIGHT, IMAGE_SAVE_PATH)
+
+    except (ValueError, OSError, RuntimeError) as e:
+         logger.error(f"Failed during image generation step: {e}", exc_info=False) # Don't need full traceback here usually
+         print(f"\nERROR: Image generation failed: {e}. Aborting.")
+         return
+    except Exception as e:
+         logger.error(f"An unexpected error occurred calling generate_random_image: {e}", exc_info=True)
+         print(f"\nERROR: Unexpected error during image generation. See log for details. Aborting.")
+         return
+
+
+    if generated_path:
+        logger.info(f"Image generation step successful: {generated_path}")
+        # 2. Set the generated image as wallpaper
+        success = set_wallpaper(generated_path) # set_wallpaper uses its own logging
+
+        if success:
+            logger.info("--- Wallpaper update process completed successfully! ---")
+            print("\nSuccess! Wallpaper should be updated.")
+        else:
+            logger.error("--- Wallpaper update process finished, but setting the wallpaper failed. ---")
+            print("\nERROR: Failed to set the new wallpaper.")
+            print("Please check the log messages above for details.")
+            print(f"The generated image is available at: {generated_path}")
+    else:
+        # This case might occur if generate_random_image returns None without raising an exception (e.g., MemoryError handled internally)
+        logger.error("--- Wallpaper update failed because image generation did not return a valid path (returned None). ---")
+        print("\nERROR: Image generation failed (returned None). See log. Aborting.")
+
+
+if __name__ == "__main__":
+    # Check dependencies
+    try:
+        import numpy
+        import PIL
+        logger.debug("NumPy and Pillow are available.")
+    except ImportError as e:
+        logger.error(f"Missing required library: {e}. Please install requirements.")
+        logger.error("Try running: pip install Pillow numpy")
+        print(f"ERROR: Missing required library: {e}. Please install requirements (pip install Pillow numpy)")
+        exit(1)
+
+    # Check required script files exist
+    required_files = ['generator.py', 'wallpaper_setter.py'] # <<< CORRECTED FILENAME
+    missing_files = [f for f in required_files if not os.path.exists(os.path.join(SCRIPT_DIRECTORY, f))]
+    if missing_files:
+         logger.error(f"Missing required script files in directory '{SCRIPT_DIRECTORY}': {', '.join(missing_files)}")
+         print(f"ERROR: Missing required script files: {', '.join(missing_files)}")
+         print(f"Ensure generator.py and wallpaper_setter.py are in the same directory as main.py.")
+         exit(1)
+
+    run_wallpaper_update()
+    print("\nScript finished.")
