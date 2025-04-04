@@ -1,0 +1,140 @@
+window_lib - Краткая документация
+Эта библиотека позволяет создавать и управлять нативными окнами Windows с использованием ctypes.
+Основное использование:
+Импорт:
+
+import window_lib as wl
+import vk_codes # Константы для клавиатуры
+
+
+Use code with caution.
+Python
+Создание экземпляра окна:
+app_window = wl.BaseWindow(
+    title="Мое Окно",
+    width=800, height=600,
+    # Передача колбэков для обработки событий:
+    on_paint=my_paint_handler,
+    on_close=my_close_handler,
+    on_keydown=my_key_handler,
+    # ... другие параметры и колбэки ...
+)
+
+
+Use code with caution.
+Python
+Окно физически создается либо при первом доступе к свойству app_window.hwnd, либо при вызове app_window.run().
+
+Запуск цикла сообщений:
+
+exit_code = app_window.run()
+print(f"Приложение завершилось с кодом: {exit_code}")
+Use code with caution.
+Python
+run() блокирует выполнение до закрытия окна.
+
+Класс BaseWindow
+
+Основной класс для создания окна.
+Параметры конструктора __init__(...) (Наиболее важные):
+title: (str) Начальный заголовок окна.
+width, height: (int) Начальные размеры всего окна (wl.CW_USEDEFAULT для стандартных).
+x, y: (int) Начальная позиция (wl.CW_USEDEFAULT для стандартных).
+parent: (int HWND или BaseWindow) Родительское окно (None для окна верхнего уровня).
+style, ex_style: (int) Флаги стилей WS_* и WS_EX_*.
+class_name: (str) Имя класса окна для регистрации в Windows. Одинаковые имена позволяют переиспользовать регистрацию.
+background: Цвет фона. Может быть:
+Индекс wl.COLOR_* (e.g., wl.COLOR_WINDOW).
+Значение COLORREF (0x00bbggrr).
+HBRUSH, полученный от GDI (e.g., wl.GetStockObject).
+None (фон не стирается автоматически, полезно для кастомной отрисовки).
+icon, cursor: ID ресурса (wl.IDI_*, wl.IDC_*) или путь к файлу (.ico, .cur).
+on_...: Функции обратного вызова (см. ниже).
+Колбэки (Передаются в конструктор)
+Определяют реакцию окна на события. Принимают hwnd окна первым аргументом.
+Жизненный цикл и отрисовка:
+on_create(hwnd): Вызывается после создания окна, до его показа. Должен вернуть 0 для успеха.
+on_paint(hwnd, hdc): Основной колбэк для рисования. Вызывается, когда нужно перерисовать окно. hdc - контекст устройства для рисования.
+on_close(hwnd) -> bool: Вызывается при попытке закрытия (нажатие крестика, Alt+F4). Верните False, чтобы отменить закрытие.
+on_destroy(hwnd) -> int: Вызывается перед уничтожением окна. Последний шанс для очистки. Возвращаемое значение становится кодом выхода run().
+Размер и позиция:
+on_size(hwnd, width, height, type): Изменение размера клиентской области (type - wl.SIZE_*).
+on_move(hwnd, x, y): Изменение позиции окна.
+Фокус:
+on_setfocus(hwnd): Окно получило фокус.
+on_killfocus(hwnd): Окно потеряло фокус.
+
+Клавиатура:
+on_keydown(hwnd, vk_code, flags): Клавиша нажата (vk_code - код из vk_codes).
+on_keyup(hwnd, vk_code, flags): Клавиша отпущена.
+on_char(hwnd, char_code, flags): Введен символ (обычно результат on_keydown).
+
+Мышь: (Принимают hwnd, x, y, flags где flags - состояние клавиш мыши wl.MK_*)
+on_lbuttondown, on_lbuttonup, on_lbuttondblclk
+on_rbuttondown, on_rbuttonup, on_rbuttondblclk
+on_mbuttondown, on_mbuttonup, on_mbuttondblclk
+on_mousemove(hwnd, x, y, flags)
+on_mousewheel(hwnd, x, y, delta, flags): (delta > 0 вверх, < 0 вниз).
+
+Другие (hover, leave): Требуют доп. настройки (TrackMouseEvent).
+Возвращаемое значение колбэка: Если колбэк возвращает значение (не None), оно используется как результат обработки сообщения. Если None - управление передается стандартному обработчику DefWindowProc.
+Основные методы экземпляра BaseWindow (для управления окном после создания):
+
+Свойства:
+hwnd: (int) Получает HWND окна (создает окно при первом доступе).
+
+Заголовок:
+set_title(title)
+get_title() -> str
+Позиция и размер:
+
+get_rect() -> RECT: Координаты окна на экране.
+get_position() -> (x, y): Экранные координаты.
+set_position(x, y): Установить экранные координаты.
+get_size() -> (width, height): Размер всего окна.
+set_size(width, height): Установить размер всего окна.
+get_client_rect() -> RECT: Размеры клиентской области (относительно ее 0,0).
+get_client_size() -> (width, height): Размер клиентской области.
+center_on_screen(): Центрирует окно.
+
+Состояние:
+
+show(cmd=wl.SW_SHOW), hide()
+minimize(), maximize(), restore()
+enable(), disable(), is_enabled() -> bool
+Z-порядок и активация:
+bring_to_top(): Поднять наверх.
+set_foreground(): Попытаться активировать.
+make_topmost(is_topmost=True): Установить "поверх всех окон".
+
+Стили:
+
+get_style() -> int, set_style(style)
+get_ex_style() -> int, set_ex_style(ex_style)
+Отрисовка:
+invalidate(rect=None, erase=True): Пометить область для перерисовки (вызовет on_paint).
+
+Жизненный цикл:
+
+close(): Инициировать закрытие (вызовет on_close).
+destroy(): Принудительно уничтожить (минуя on_close).
+Утилиты (Функции модуля wl.*):
+LOWORD(l), HIWORD(l), LOBYTE(w), HIBYTE(w), GET_X_LPARAM(lp), GET_Y_LPARAM(lp): Для разбора WPARAM/LPARAM.
+get_screen_size() -> (w, h)
+get_cursor_pos() -> POINT
+screen_to_client(hwnd, point) -> POINT
+client_to_screen(hwnd, point) -> POINT
+get_last_error_message(code=None) -> str: Получить текст ошибки WinAPI.
+Прочие утилиты рисования: draw_text, set_text_color, set_bk_mode.
+
+Константы:
+
+Большинство констант (WM_*, WS_*, CS_*, SW_*, COLOR_*, MK_* и т.д.) определены внутри window_lib.py.
+Виртуальные коды клавиш (VK_*) находятся в отдельном файле vk_codes.py.
+
+Важные замечания:
+
+run() блокирует основной поток до закрытия окна. Для фоновых задач используйте потоки (threading).
+HWND (app_window.hwnd) действителен только между успешным созданием окна и его полным уничтожением (после WM_NCDESTROY).
+Колбэки должны выполняться быстро, чтобы не "замораживать" интерфейс.
+Если вы создаете GDI-объекты (кисти, перья) вне on_paint (например, с помощью wl.CreateSolidBrush), вы обязаны удалить их с помощью wl.DeleteObject (хорошее место - on_destroy). Библиотека удаляет только кастомную фоновую кисть, если она была создана автоматически.
