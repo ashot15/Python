@@ -1,0 +1,104 @@
+# main.py
+import window_lib as wl
+import vk_codes        # <<< ИМПОРТ VK КОНСТАНТ
+import sys
+import ctypes
+
+# --- Функции-колбэки для окна ---
+def my_on_paint(hwnd, hdc):
+    try:
+        rect = wl.get_client_rect(hwnd)
+        text = f"Hello from window_lib!\nHWND: {hwnd}\nSize: {rect.right}x{rect.bottom}"
+        wl.set_text_color(hdc, 0x00FF0000)
+        wl.set_bk_mode(hdc, 1)
+        DT_CENTER = 0x00000001
+        DT_WORDBREAK = 0x00000010
+        DT_NOCLIP = 0x00000100
+        DT_EDITCONTROL= 0x00002000 # Helps with vertical centering with wordbreak
+        # VCENTER often needs SINGLELINE, let's use Edit control logic which is better for multi-line vertical center
+        wl.draw_text(hdc, text, rect, DT_CENTER | DT_WORDBREAK | DT_NOCLIP | DT_EDITCONTROL )
+
+    except Exception as e:
+        print(f"Error during painting: {e}", file=sys.stderr)
+
+def my_on_close(hwnd):
+    title = "Подтверждение"
+    text = "Вы уверены, что хотите закрыть окно?"
+    MB_YESNO = 0x00000004
+    MB_ICONQUESTION = 0x00000020
+    IDYES = 6
+    result = wl.MessageBoxW(hwnd, text, title, MB_YESNO | MB_ICONQUESTION)
+    return result == IDYES
+
+def my_on_destroy(hwnd):
+    print(f"Window HWND={hwnd} is being destroyed. Application will exit.")
+    return 0
+
+def my_on_size(hwnd, width, height, resize_type):
+    print(f"Window resized: width={width}, height={height}, type={resize_type}")
+    # Перерисовываем окно при изменении размера
+    wl.InvalidateRect(hwnd, None, True) # Передать None вместо ctypes.cast(0,...)
+
+def my_on_lbuttondown(hwnd, x, y, flags):
+    print(f"Left mouse button down at ({x}, {y}), Flags: {flags:#X}") # Hex format for flags
+
+def my_on_keydown(hwnd, vk_code, flags):
+     repeat_count = wl.LOWORD(flags)
+     scan_code = wl.LOBYTE(wl.HIWORD(flags)) # Извлекаем Scan Code
+     is_extended = (wl.HIWORD(flags) & 0x0100) != 0 # extended-key flag (e.g., right Alt, Ctrl)
+     # is_alt_down = (flags & 0x20000000) != 0 # context code (1 if ALT was down) - Less reliable? Use GetKeyState
+     previous_state = (flags & 0x40000000) != 0 # previous key state (1 if down before msg)
+     transition_state = (flags & 0x80000000) != 0 # transition state (1 if being released, 0 if pressed) - WM_KEYDOWN should be 0
+
+     print(f"Key down: VK={vk_code:#X}, Repeat={repeat_count}, Scan={scan_code:#X}, Extended={is_extended}, PrevDown={previous_state}")
+
+     # Закрыть окно по нажатию Escape
+     if vk_code == vk_codes.VK_ESCAPE: # <<< ИСПОЛЬЗУЕМ vk_codes.VK_ESCAPE
+         print("Escape pressed, closing window...")
+         app_window.close() # Можно вызывать метод экземпляра
+
+     # Вернуть None, чтобы стандартный обработчик (например, для навигации) сработал
+     return None
+
+# --- LOBYTE/HIBYTE (Нужны для разбора флагов клавиш) ---
+def LOBYTE(w):
+    return ctypes.c_ubyte(w & 0xff).value
+def HIBYTE(w):
+    return ctypes.c_ubyte((w >> 8) & 0xff).value
+
+# Добавим эти утилиты в window_lib.py для полноты (или оставим здесь)
+# Добавил в window_lib.py для чистоты main.py
+
+
+# --- Основная часть приложения ---
+if __name__ == "__main__":
+    print("Initializing application...")
+    try:
+        app_window = wl.BaseWindow(
+            title="Мое Приложение на window_lib v3",
+            width=600, height=400,
+            on_paint=my_on_paint,
+            on_close=my_on_close,
+            on_destroy=my_on_destroy,
+            on_size=my_on_size,
+            on_lbuttondown=my_on_lbuttondown,
+            on_keydown=my_on_keydown,
+            class_name="MainAppWindowV3"
+        )
+
+        print("Starting message loop...")
+        exit_code = app_window.run()
+        print(f"Application finished with exit code: {exit_code}")
+        sys.exit(exit_code)
+
+    except Exception as e:
+        error_title = "Критическая ошибка"
+        error_text = f"Произошла неустранимая ошибка:\n\n{e}"
+        # В идеале, нужно показать traceback, но для MessageBox это сложно
+        MB_OK = 0x0
+        MB_ICONERROR = 0x10
+        wl.MessageBoxW(None, error_text, error_title, MB_OK | MB_ICONERROR)
+        import traceback
+        print(f"Critical error: {e}", file=sys.stderr)
+        traceback.print_exc() # Печатаем traceback в консоль
+        sys.exit(1)
