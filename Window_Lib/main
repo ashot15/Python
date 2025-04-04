@@ -1,104 +1,167 @@
 # main.py
 import window_lib as wl
-import vk_codes        # <<< ИМПОРТ VK КОНСТАНТ
+import vk_codes
 import sys
 import ctypes
 
 # --- Функции-колбэки для окна ---
+is_drawing = False # Флаг для рисования мышью
+last_pos = None
+
 def my_on_paint(hwnd, hdc):
     try:
         rect = wl.get_client_rect(hwnd)
-        text = f"Hello from window_lib!\nHWND: {hwnd}\nSize: {rect.right}x{rect.bottom}"
-        wl.set_text_color(hdc, 0x00FF0000)
-        wl.set_bk_mode(hdc, 1)
-        DT_CENTER = 0x00000001
-        DT_WORDBREAK = 0x00000010
-        DT_NOCLIP = 0x00000100
-        DT_EDITCONTROL= 0x00002000 # Helps with vertical centering with wordbreak
-        # VCENTER often needs SINGLELINE, let's use Edit control logic which is better for multi-line vertical center
-        wl.draw_text(hdc, text, rect, DT_CENTER | DT_WORDBREAK | DT_NOCLIP | DT_EDITCONTROL )
+        # Просто заливка цветом фона (система сделает это сама, если есть кисть)
+        # Белая кисть: hbrush_white = wl.GetStockObject(wl.WHITE_BRUSH)
+        # wl.user32.FillRect(hdc, ctypes.byref(rect), hbrush_white)
+
+        # Нарисуем что-нибудь еще
+        text = "Нажмите 'C', чтобы центрировать\n'T', чтобы сделать TopMost\nЛКМ для рисования"
+        wl.set_text_color(hdc, 0x00404040) # Темно-серый
+        wl.set_bk_mode(hdc, wl.TRANSPARENT)
+        DT_CENTER = 0x0001; DT_VCENTER=0x0004; DT_WORDBREAK = 0x0010; DT_NOCLIP=0x0100;
+        wl.draw_text(hdc, text, rect, DT_CENTER | DT_VCENTER | DT_WORDBREAK | DT_NOCLIP)
 
     except Exception as e:
         print(f"Error during painting: {e}", file=sys.stderr)
 
 def my_on_close(hwnd):
     title = "Подтверждение"
-    text = "Вы уверены, что хотите закрыть окно?"
-    MB_YESNO = 0x00000004
-    MB_ICONQUESTION = 0x00000020
-    IDYES = 6
-    result = wl.MessageBoxW(hwnd, text, title, MB_YESNO | MB_ICONQUESTION)
-    return result == IDYES
+    text = "Точно выходим?"
+    result = wl.MessageBoxW(hwnd, text, title, 0x04 | 0x20) # MB_YESNO | MB_ICONQUESTION
+    return result == 6 # IDYES
 
 def my_on_destroy(hwnd):
-    print(f"Window HWND={hwnd} is being destroyed. Application will exit.")
-    return 0
+    print("Окно уничтожено. Завершение.")
+    return 0 # Код выхода приложения
 
 def my_on_size(hwnd, width, height, resize_type):
-    print(f"Window resized: width={width}, height={height}, type={resize_type}")
-    # Перерисовываем окно при изменении размера
-    wl.InvalidateRect(hwnd, None, True) # Передать None вместо ctypes.cast(0,...)
+    type_str = {wl.SIZE_RESTORED: "Restored", wl.SIZE_MINIMIZED: "Minimized", wl.SIZE_MAXIMIZED:"Maximized"}.get(resize_type, "Other")
+    print(f"Размер изменен: {width}x{height}, Тип: {type_str}")
+    # Окно само перерисовывается из-за CS_HREDRAW/CS_VREDRAW
 
-def my_on_lbuttondown(hwnd, x, y, flags):
-    print(f"Left mouse button down at ({x}, {y}), Flags: {flags:#X}") # Hex format for flags
+def my_on_move(hwnd, x, y):
+    # Внимание: x,y здесь могут быть относительно родителя, не экрана
+    print(f"Окно перемещено (приблизительно) в {x}, {y}")
 
 def my_on_keydown(hwnd, vk_code, flags):
-     repeat_count = wl.LOWORD(flags)
-     scan_code = wl.LOBYTE(wl.HIWORD(flags)) # Извлекаем Scan Code
-     is_extended = (wl.HIWORD(flags) & 0x0100) != 0 # extended-key flag (e.g., right Alt, Ctrl)
-     # is_alt_down = (flags & 0x20000000) != 0 # context code (1 if ALT was down) - Less reliable? Use GetKeyState
-     previous_state = (flags & 0x40000000) != 0 # previous key state (1 if down before msg)
-     transition_state = (flags & 0x80000000) != 0 # transition state (1 if being released, 0 if pressed) - WM_KEYDOWN should be 0
+     print(f"Нажата клавиша: VK={vk_code:#X}")
+     if vk_code == vk_codes.VK_ESCAPE:
+         print("Нажат Escape, закрываем...")
+         app_window.close() # Используем метод экземпляра
+     elif vk_code == ord('C'): # Используем ord() для букв
+         print("Центрирование окна...")
+         app_window.center_on_screen()
+     elif vk_code == ord('T'):
+         print("Переключение TopMost...")
+         try:
+            # Переключаем состояние
+             current_ex_style = app_window.get_ex_style()
+             if current_ex_style & wl.WS_EX_TOPMOST:
+                 app_window.make_topmost(False)
+                 print("Окно НЕ TopMost")
+             else:
+                 app_window.make_topmost(True)
+                 print("Окно стало TopMost")
+         except Exception as e:
+             print(f"Ошибка установки TopMost: {e}")
+     elif vk_code == vk_codes.VK_SPACE:
+          # Пример получения другого свойства
+          title = app_window.get_title()
+          print(f"Текущий заголовок: {title}")
+          app_window.set_title(title + "!") # Меняем заголовок
+          app_window.invalidate() # Запрашиваем перерисовку, если надо
 
-     print(f"Key down: VK={vk_code:#X}, Repeat={repeat_count}, Scan={scan_code:#X}, Extended={is_extended}, PrevDown={previous_state}")
+     return None # Разрешить дальнейшую обработку (если нужна)
 
-     # Закрыть окно по нажатию Escape
-     if vk_code == vk_codes.VK_ESCAPE: # <<< ИСПОЛЬЗУЕМ vk_codes.VK_ESCAPE
-         print("Escape pressed, closing window...")
-         app_window.close() # Можно вызывать метод экземпляра
+def my_on_lbuttondown(hwnd, x, y, flags):
+    global is_drawing, last_pos
+    print(f"ЛКМ нажата в ({x}, {y})")
+    is_drawing = True
+    last_pos = (x, y)
+    wl.SetCapture(hwnd) # Захватываем мышь, чтобы получать события, даже если курсор вне окна
 
-     # Вернуть None, чтобы стандартный обработчик (например, для навигации) сработал
-     return None
+def my_on_lbuttonup(hwnd, x, y, flags):
+    global is_drawing, last_pos
+    print(f"ЛКМ отпущена в ({x}, {y})")
+    if is_drawing:
+        # Можно нарисовать последнюю линию
+        hdc = wl.user32.GetDC(hwnd) # Получаем DC для рисования вне WM_PAINT
+        if hdc:
+             try:
+                  pen = wl.gdi32.CreatePen(0, 2, 0x000000FF) # Красное перо толщиной 2
+                  old_pen = wl.gdi32.SelectObject(hdc, pen)
+                  wl.gdi32.MoveToEx(hdc, last_pos[0], last_pos[1], None)
+                  wl.gdi32.LineTo(hdc, x, y)
+                  wl.gdi32.SelectObject(hdc, old_pen) # Восстанавливаем старое перо
+                  wl.gdi32.DeleteObject(pen) # Удаляем созданное перо!
+             finally:
+                  wl.user32.ReleaseDC(hwnd, hdc) # Освобождаем DC!
+        is_drawing = False
+        last_pos = None
+        wl.ReleaseCapture() # Освобождаем мышь
 
-# --- LOBYTE/HIBYTE (Нужны для разбора флагов клавиш) ---
-def LOBYTE(w):
-    return ctypes.c_ubyte(w & 0xff).value
-def HIBYTE(w):
-    return ctypes.c_ubyte((w >> 8) & 0xff).value
+def my_on_mousemove(hwnd, x, y, flags):
+    global is_drawing, last_pos
+    # Сообщения о движении мыши могут приходить часто, не засоряем консоль
+    # print(f"Мышь движется: ({x}, {y}), Клавиши: {flags:#X}")
+    if is_drawing and (flags & wl.MK_LBUTTON): # Рисуем только если ЛКМ все еще нажата
+        hdc = wl.user32.GetDC(hwnd)
+        if hdc:
+            try:
+                pen = wl.gdi32.CreatePen(0, 2, 0x000000FF) # Красное перо
+                old_pen = wl.gdi32.SelectObject(hdc, pen)
+                wl.gdi32.MoveToEx(hdc, last_pos[0], last_pos[1], None)
+                wl.gdi32.LineTo(hdc, x, y)
+                wl.gdi32.SelectObject(hdc, old_pen)
+                wl.gdi32.DeleteObject(pen)
+            finally:
+                wl.user32.ReleaseDC(hwnd, hdc)
+            last_pos = (x, y) # Обновляем последнюю позицию
 
-# Добавим эти утилиты в window_lib.py для полноты (или оставим здесь)
-# Добавил в window_lib.py для чистоты main.py
-
+def my_on_setfocus(hwnd):
+     print("Окно получило фокус")
+def my_on_killfocus(hwnd):
+     print("Окно потеряло фокус")
 
 # --- Основная часть приложения ---
 if __name__ == "__main__":
     print("Initializing application...")
     try:
         app_window = wl.BaseWindow(
-            title="Мое Приложение на window_lib v3",
-            width=600, height=400,
+            title="Расширенное Окно (Нажмите 'C', 'T', рисуйте ЛКМ)",
+            width=700, height=500,
+            # Используем колбэки
             on_paint=my_on_paint,
             on_close=my_on_close,
             on_destroy=my_on_destroy,
             on_size=my_on_size,
-            on_lbuttondown=my_on_lbuttondown,
+            on_move=my_on_move,
             on_keydown=my_on_keydown,
-            class_name="MainAppWindowV3"
+            on_lbuttondown=my_on_lbuttondown,
+            on_lbuttonup=my_on_lbuttonup,
+            on_mousemove=my_on_mousemove,
+            on_setfocus=my_on_setfocus,
+            on_killfocus=my_on_killfocus,
+            class_name="MyEnhancedWindowClass" # Имя класса для регистрации
+            # background=0x00EEEEEE # Светло-серый фон (BBGGRR)
+            # background=None # Без фона (сами рисуем в on_paint)
         )
 
         print("Starting message loop...")
+        # Можно получить HWND перед циклом (окно будет создано)
+        # print(f"Window HWND: {app_window.hwnd}")
+
         exit_code = app_window.run()
         print(f"Application finished with exit code: {exit_code}")
         sys.exit(exit_code)
 
     except Exception as e:
-        error_title = "Критическая ошибка"
-        error_text = f"Произошла неустранимая ошибка:\n\n{e}"
-        # В идеале, нужно показать traceback, но для MessageBox это сложно
-        MB_OK = 0x0
-        MB_ICONERROR = 0x10
-        wl.MessageBoxW(None, error_text, error_title, MB_OK | MB_ICONERROR)
         import traceback
+        error_title = "Критическая ошибка приложения"
+        error_text = f"Произошла неустранимая ошибка:\n\n{e}\n\n{traceback.format_exc()}" # Включаем traceback
         print(f"Critical error: {e}", file=sys.stderr)
-        traceback.print_exc() # Печатаем traceback в консоль
+        traceback.print_exc()
+        # Показываем пользователю, если можем
+        wl.MessageBoxW(None, error_text, error_title, 0x0 | 0x10) # MB_OK | MB_ICONERROR
         sys.exit(1)
