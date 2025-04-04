@@ -1,0 +1,201 @@
+# image_generator.py
+import numpy as np
+from PIL import Image # Corrected import
+import os
+import logging
+import time
+
+# Configure basic logging (can be configured further in main.py if needed)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Configuration ---
+# Define a reasonable limit to prevent excessive memory allocation
+# Example: Limit to ~256 MB for the raw pixel data (adjust as needed)
+# Calculation: width * height * 3 (bytes for RGB) < MAX_BYTES
+MAX_BYTES = 256 * 1024 * 1024 # 256 MiB
+# Or define by max pixels (e.g., 8K resolution equivalent)
+# MAX_PIXELS = 7680 * 4320
+MAX_PIXELS = MAX_BYTES // 3 # Calculate max pixels based on byte limit for RGB
+# --- End Configuration ---
+
+
+def generate_random_image(width: int, height: int, save_path: str) -> str | None:
+    """
+    Generates an image with random pixel colors using NumPy for performance
+    and saves it using Pillow.
+
+    Args:
+        width: The width of the image in pixels (must be > 0).
+        height: The height of the image in pixels (must be > 0).
+        save_path: The full path (including filename) where the image should be saved.
+                   The format is determined by the file extension (e.g., .png, .jpg).
+
+    Returns:
+        The absolute path where the image was saved if successful, otherwise None.
+
+    Raises:
+        ValueError: If width, height are not positive integers, save_path is invalid,
+                    or the requested dimensions exceed the configured limit (MAX_PIXELS).
+        OSError: If file system errors occur (permissions, disk full, etc.).
+
+    Requires:
+        - Pillow (pip install Pillow)
+        - NumPy (pip install numpy)
+    """
+    # --- Input Validation ---
+    if not isinstance(width, int) or width <= 0:
+        msg = f"Invalid width provided: {width}. Must be a positive integer."
+        logging.error(msg)
+        raise ValueError(msg)
+    if not isinstance(height, int) or height <= 0:
+        msg = f"Invalid height provided: {height}. Must be a positive integer."
+        logging.error(msg)
+        raise ValueError(msg)
+    if not isinstance(save_path, str) or not save_path.strip():
+        msg = "Invalid save_path provided. Must be a non-empty string."
+        logging.error(msg)
+        raise ValueError(msg)
+
+    # --- Resource Limit Check ---
+    num_pixels = width * height
+    if num_pixels > MAX_PIXELS:
+        msg = (f"Requested image dimensions ({width}x{height} = {num_pixels} pixels) "
+               f"exceed the configured limit of {MAX_PIXELS} pixels. "
+               f"Aborting to prevent excessive memory usage.")
+        logging.error(msg)
+        raise ValueError(msg)
+
+    abs_save_path = os.path.abspath(save_path)
+    output_dir = os.path.dirname(abs_save_path)
+
+    logging.info(f"Attempting to generate a {width}x{height} random RGB image ({num_pixels} pixels).")
+    start_time = time.time()
+
+    try:
+        # --- Directory Creation & Permissions Check ---
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            if not os.access(output_dir, os.W_OK):
+                msg = f"Output directory '{output_dir}' is not writable."
+                logging.error(msg)
+                raise OSError(msg) # Raise OSError for permission issues
+        elif not os.access('.', os.W_OK): # Check current dir if no specific dir given
+            msg = "Current directory '.' is not writable."
+            logging.error(msg)
+            raise OSError(msg) # Raise OSError for permission issues
+
+        # --- Image Data Generation (using NumPy) ---
+        logging.debug(f"Allocating NumPy array for {height}x{width}x3...")
+        # Use np.uint8 for 0-255 range directly
+        random_data: np.ndarray = np.random.randint(0, 256, size=(height, width, 3), dtype=np.uint8)
+        generation_time = time.time() - start_time
+        logging.debug(f"NumPy array generated in {generation_time:.4f} seconds.")
+
+        # --- Image Creation (from NumPy data) ---
+        img = Image.fromarray(random_data, 'RGB')
+        logging.debug("Pillow Image object created from NumPy array.")
+
+        # --- Image Saving ---
+        logging.info(f"Saving image to: {abs_save_path}")
+        # Pillow's save handles format based on extension and raises errors
+        # (like IOError, OSError, ValueError for unsupported formats) on failure.
+        img.save(abs_save_path)
+        end_time = time.time()
+
+        logging.info(f"Image successfully generated and saved in {end_time - start_time:.4f} seconds.")
+        return abs_save_path
+
+    # --- Specific Error Handling ---
+    except MemoryError:
+        # Should be less likely now due to MAX_PIXELS check, but still possible
+        logging.error(f"Memory Error: Not enough memory to create or process the {width}x{height} image.", exc_info=True)
+        return None # Return None for memory errors specifically if you don't want main to crash
+    except (IOError, OSError) as e:
+        # Catch errors related to file system operations (makedirs, save, permissions, disk full)
+        logging.error(f"File system error for path '{abs_save_path}': {e}", exc_info=True)
+        # Re-raise OSError so the caller (main.py) knows a file system problem occurred
+        raise OSError(f"File system error for path '{abs_save_path}': {e}") from e
+    except ValueError as e:
+         # Catch potential Pillow internal ValueErrors (e.g., unknown file extension)
+         # Also catches our own validation errors if they weren't caught earlier (shouldn't happen)
+         logging.error(f"Value error during image processing or saving: {e}", exc_info=True)
+         # Re-raise ValueError
+         raise ValueError(f"Value error during image processing or saving: {e}") from e
+    except Exception as e:
+        # Catch any other unexpected errors during generation/saving
+        logging.error(f"An unexpected error occurred during image generation/saving: {e}", exc_info=True)
+        # It might be better to raise a generic exception here too, so the caller knows *something* failed
+        raise RuntimeError(f"An unexpected error occurred: {e}") from e
+
+
+# Example usage (optional, for testing this file directly)
+if __name__ == '__main__':
+    logging.info("--- Running image_generator.py directly for testing ---")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    test_filename = "test_generated_random_image.png"
+    test_path = os.path.join(script_dir, test_filename)
+
+    test_width, test_height = 200, 150
+
+    # --- Test Success Case ---
+    try:
+        logging.info(f"--- Testing valid generation ({test_width}x{test_height}) ---")
+        generated_file = generate_random_image(test_width, test_height, test_path)
+
+        if generated_file and os.path.exists(generated_file):
+            logging.info(f"Test successful: Image generated at {generated_file}")
+            # Optional: Clean up the test file
+            # try:
+            #     os.remove(generated_file)
+            #     logging.info(f"Cleaned up test file: {generated_file}")
+            # except OSError as e:
+            #     logging.warning(f"Could not clean up test file: {e}")
+        else:
+            logging.error("Test failed: Image generation did not return a valid path or file not found.")
+
+    except (ValueError, OSError, RuntimeError) as e:
+         logging.error(f"Test failed unexpectedly during valid generation: {e}", exc_info=True)
+    except Exception as e:
+         logging.error(f"An unexpected error occurred during the valid test: {e}", exc_info=True)
+
+
+    # --- Test Invalid Size (Too Small) ---
+    try:
+        logging.info("--- Testing invalid input (negative size) ---")
+        generate_random_image(-100, 100, "invalid_size.png")
+        logging.error("Test failed: Expected ValueError for negative size was not raised.")
+    except ValueError as e:
+        logging.info(f"Successfully caught expected error for invalid size: {e}")
+    except Exception as e:
+        logging.error(f"Test failed: Unexpected error during invalid size test: {e}", exc_info=True)
+
+    # --- Test Invalid Size (Too Large) ---
+    try:
+        logging.info("--- Testing invalid input (size too large) ---")
+        # Calculate dimensions that exceed the limit
+        large_dim = int((MAX_PIXELS**0.5) + 10) # Dimension slightly larger than sqrt(MAX_PIXELS)
+        generate_random_image(large_dim, large_dim, "too_large.png")
+        logging.error("Test failed: Expected ValueError for excessive size was not raised.")
+    except ValueError as e:
+        logging.info(f"Successfully caught expected error for excessive size: {e}")
+    except MemoryError:
+        # This might happen if the check fails or memory is tight anyway
+        logging.info("Caught MemoryError during large size test (also acceptable failure).")
+    except Exception as e:
+        logging.error(f"Test failed: Unexpected error during excessive size test: {e}", exc_info=True)
+
+    # --- Test Invalid Path (Permissions - harder to test reliably) ---
+    # Example: Trying to save to a root directory (might fail on non-admin Linux/macOS)
+    # Or create a read-only directory for testing. This setup is complex for a simple test.
+    # try:
+    #     logging.info("--- Testing invalid path (permission denied - example) ---")
+    #     invalid_path = "/test_permission_denied.png" # Or a known non-writable path
+    #     generate_random_image(50, 50, invalid_path)
+    #     logging.error("Test failed: Expected OSError for permission denied was not raised.")
+    # except OSError as e:
+    #     logging.info(f"Successfully caught expected OSError for permission denied: {e}")
+    # except Exception as e:
+    #     logging.error(f"Test failed: Unexpected error during permission test: {e}", exc_info=True)
+
+
+    logging.info("--- image_generator.py test finished ---")
