@@ -1,66 +1,125 @@
 # window_lib.py
-# Библиотека для создания и управления окном приложения Windows с использованием ctypes.
+# Расширенная библиотека для создания и управления окном Windows с использованием ctypes.
 
 import ctypes
 import ctypes.wintypes as wintypes
 import sys
 import platform
-import vk_codes # <<< ИМПОРТ КОНСТАНТ КЛАВИШ
+import vk_codes # Константы клавиш
 
 # --- Определения базовых типов HANDLE ---
+CW_USEDEFAULT = -2147483648
 HCURSOR = wintypes.HANDLE
 HICON = wintypes.HANDLE
 HBRUSH = wintypes.HANDLE
 HGDIOBJ = wintypes.HANDLE
+HWND = wintypes.HWND
+HMENU = wintypes.HMENU
+HDC = wintypes.HDC
+HINSTANCE = wintypes.HINSTANCE
+COLORREF = wintypes.DWORD
+BOOL = wintypes.BOOL
+UINT = wintypes.UINT
+INT = wintypes.INT
+DWORD = wintypes.DWORD
+WORD = wintypes.WORD
+LONG = wintypes.LONG
+BYTE = wintypes.BYTE
+LPVOID = wintypes.LPVOID
+LPCWSTR = wintypes.LPCWSTR
+POINT = wintypes.POINT
+RECT = wintypes.RECT
 
 # --- Определение платформо-зависимых типов и функций ---
 IS_64BIT = platform.architecture()[0] == '64bit'
-
 if IS_64BIT:
     LONG_PTR = ctypes.c_longlong
     ULONG_PTR = ctypes.c_ulonglong
-    SetWindowLongPtr = ctypes.windll.user32.SetWindowLongPtrW
-    GetWindowLongPtr = ctypes.windll.user32.GetWindowLongPtrW
+    # Указываем, что они из user32 явно
+    SetWindowLongPtrW = ctypes.windll.user32.SetWindowLongPtrW
+    GetWindowLongPtrW = ctypes.windll.user32.GetWindowLongPtrW
 else:
-    LONG_PTR = ctypes.c_long # wintypes.LONG
-    ULONG_PTR = ctypes.c_ulong # wintypes.ULONG
-    SetWindowLongPtr = ctypes.windll.user32.SetWindowLongW
-    GetWindowLongPtr = ctypes.windll.user32.GetWindowLongW
+    LONG_PTR = ctypes.c_long
+    ULONG_PTR = ctypes.c_ulong
+    SetWindowLongPtrW = ctypes.windll.user32.SetWindowLongW
+    GetWindowLongPtrW = ctypes.windll.user32.GetWindowLongW
 
 # --- Определения WPARAM и LPARAM ---
 WPARAM = ULONG_PTR
 LPARAM = LONG_PTR
 
-# --- Макросы LOWORD / HIWORD --- <<< ДОБАВЛЕНО
-def LOWORD(l):
-  """ Извлекает младшее 16-битное значение (WORD) из LPARAM/DWORD_PTR. """
-  return ctypes.c_ushort(l & 0xffff).value # Возвращает как Python int
+# --- Макросы LOWORD/HIWORD/LOBYTE/HIBYTE ---
+def LOWORD(l): return ctypes.c_ushort(l & 0xffff).value
+def HIWORD(l): return ctypes.c_ushort((l >> 16) & 0xffff).value
+def LOBYTE(w): return ctypes.c_ubyte(w & 0xff).value
+def HIBYTE(w): return ctypes.c_ubyte((w >> 8) & 0xff).value
+def GET_X_LPARAM(lp): return ctypes.c_short(LOWORD(lp)).value # Координаты мыши могут быть знаковыми
+def GET_Y_LPARAM(lp): return ctypes.c_short(HIWORD(lp)).value # Координаты мыши могут быть знаковыми
 
-def HIWORD(l):
-  """ Извлекает старшее 16-битное значение (WORD) из LPARAM/DWORD_PTR. """
-  return ctypes.c_ushort((l >> 16) & 0xffff).value # Возвращает как Python int
-
-# --- Константы WinAPI (кроме VK_*) ---
-# ... (остальные константы без изменений: GWLP_USERDATA, WS_*, WM_*, CS_*, SW_*, etc.) ...
-# Индекс для хранения указателя на объект Python в данных окна
+# --- Основные Константы WinAPI ---
+# Индексы GetWindowLongPtr / SetWindowLongPtr
+GWL_STYLE = -16
+GWL_EXSTYLE = -20
+GWLP_HINSTANCE = -6
+GWLP_HWNDPARENT = -8
+GWLP_ID = -12
 GWLP_USERDATA = -21
+# Индексы GetClassLongPtr / SetClassLongPtr (не используются пока)
+# GCLP_HBRBACKGROUND = -10
+# GCLP_HCURSOR = -12
+# GCLP_HICON = -14
+# GCLP_HICONSM = -34
 
-# Константы стилей окна (WS_*)
+# Константы стилей окна (WS_*) - Неполный список
 WS_OVERLAPPED = 0x00000000
+WS_POPUP = 0x80000000
+WS_CHILD = 0x40000000
+WS_MINIMIZE = 0x20000000
+WS_VISIBLE = 0x10000000
+WS_DISABLED = 0x08000000
+WS_CLIPSIBLINGS = 0x04000000
+WS_CLIPCHILDREN = 0x02000000
+WS_MAXIMIZE = 0x01000000
 WS_CAPTION = 0x00C00000
+WS_BORDER = 0x00800000
+WS_DLGFRAME = 0x00400000
+WS_VSCROLL = 0x00200000
+WS_HSCROLL = 0x00100000
 WS_SYSMENU = 0x00080000
-WS_THICKFRAME = 0x00040000 # Resizeable
+WS_THICKFRAME = 0x00040000 # Resizable border
+WS_GROUP = 0x00020000
+WS_TABSTOP = 0x00010000
 WS_MINIMIZEBOX = 0x00020000
 WS_MAXIMIZEBOX = 0x00010000
 WS_OVERLAPPEDWINDOW = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
                        WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
-WS_VISIBLE = 0x10000000
-WS_CLIPCHILDREN = 0x02000000
-WS_CLIPSIBLINGS = 0x04000000
+WS_POPUPWINDOW = (WS_POPUP | WS_BORDER | WS_SYSMENU)
 
-# Расширенные стили окна (WS_EX_*)
-WS_EX_APPWINDOW = 0x00040000
+# Расширенные стили окна (WS_EX_*) - Неполный список
+WS_EX_DLGMODALFRAME = 0x00000001
+WS_EX_NOPARENTNOTIFY = 0x00000004
+WS_EX_TOPMOST = 0x00000008
+WS_EX_ACCEPTFILES = 0x00000010
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_MDICHILD = 0x00000040
+WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_WINDOWEDGE = 0x00000100
+WS_EX_CLIENTEDGE = 0x00000200
+WS_EX_CONTEXTHELP = 0x00000400
+WS_EX_RIGHT = 0x00001000
+WS_EX_LEFT = 0x00000000
+WS_EX_RTLREADING = 0x00002000
+WS_EX_LTRREADING = 0x00000000
+WS_EX_LEFTSCROLLBAR = 0x00004000
+WS_EX_RIGHTSCROLLBAR = 0x00000000
+WS_EX_CONTROLPARENT = 0x00010000
+WS_EX_STATICEDGE = 0x00020000
+WS_EX_APPWINDOW = 0x00040000
+WS_EX_LAYERED = 0x00080000
+WS_EX_NOINHERITLAYOUT = 0x00100000
+WS_EX_LAYOUTRTL = 0x00400000
+WS_EX_COMPOSITED = 0x02000000
+WS_EX_NOACTIVATE = 0x08000000
 
 # Идентификаторы стандартных ресурсов
 IDC_ARROW = 32512
@@ -70,628 +129,1232 @@ IDI_APPLICATION = 32512
 COLOR_WINDOW = 5
 WHITE_BRUSH = 0
 NULL_BRUSH = 5
+TRANSPARENT = 1
+OPAQUE = 2
 
-# Сообщения окна (WM_*)
+# Сообщения окна (WM_*) - Расширенный список
+WM_NULL = 0x0000
 WM_CREATE = 0x0001
 WM_DESTROY = 0x0002
+WM_MOVE = 0x0003
+WM_SIZE = 0x0005
+WM_ACTIVATE = 0x0006
+WM_SETFOCUS = 0x0007
+WM_KILLFOCUS = 0x0008
+WM_ENABLE = 0x000A
+WM_SETREDRAW = 0x000B
+WM_SETTEXT = 0x000C
+WM_GETTEXT = 0x000D
+WM_GETTEXTLENGTH = 0x000E
 WM_PAINT = 0x000F
 WM_CLOSE = 0x0010
-WM_SIZE = 0x0005
+WM_QUERYENDSESSION = 0x0011
+WM_QUERYOPEN = 0x0013
+WM_ENDSESSION = 0x0016
+WM_QUIT = 0x0012
+WM_ERASEBKGND = 0x0014
+WM_SYSCOLORCHANGE = 0x0015
+WM_SHOWWINDOW = 0x0018
+WM_WININICHANGE = 0x001A # Also WM_SETTINGCHANGE
+WM_SETTINGCHANGE = 0x001A
+WM_DEVMODECHANGE = 0x001B
+WM_ACTIVATEAPP = 0x001C
+WM_FONTCHANGE = 0x001D
+WM_TIMECHANGE = 0x001E
+WM_CANCELMODE = 0x001F
+WM_SETCURSOR = 0x0020
+WM_MOUSEACTIVATE = 0x0021
+WM_CHILDACTIVATE = 0x0022
+WM_QUEUESYNC = 0x0023
+WM_GETMINMAXINFO = 0x0024
+WM_PAINTICON = 0x0026
+WM_ICONERASEBKGND = 0x0027
+WM_NEXTDLGCTL = 0x0028
+WM_SPOOLERSTATUS = 0x002A
+WM_DRAWITEM = 0x002B
+WM_MEASUREITEM = 0x002C
+WM_DELETEITEM = 0x002D
+WM_VKEYTOITEM = 0x002E
+WM_CHARTOITEM = 0x002F
+WM_SETFONT = 0x0030
+WM_GETFONT = 0x0031
+WM_SETHOTKEY = 0x0032
+WM_GETHOTKEY = 0x0033
+WM_QUERYDRAGICON = 0x0037
+WM_COMPAREITEM = 0x0039
+WM_GETOBJECT = 0x003D
+WM_COMPACTING = 0x0041
+WM_COMMNOTIFY = 0x0044 # obsolete
+WM_WINDOWPOSCHANGING = 0x0046
+WM_WINDOWPOSCHANGED = 0x0047
+WM_POWER = 0x0048
+WM_COPYDATA = 0x004A
+WM_CANCELJOURNAL = 0x004B
+WM_NOTIFY = 0x004E
+WM_INPUTLANGCHANGEREQUEST = 0x0050
+WM_INPUTLANGCHANGE = 0x0051
+WM_TCARD = 0x0052
+WM_HELP = 0x0053
+WM_USERCHANGED = 0x0054
+WM_NOTIFYFORMAT = 0x0055
+WM_CONTEXTMENU = 0x007B
+WM_STYLECHANGING = 0x007C
+WM_STYLECHANGED = 0x007D
+WM_DISPLAYCHANGE = 0x007E
+WM_GETICON = 0x007F
+WM_SETICON = 0x0080
 WM_NCCREATE = 0x0081
 WM_NCDESTROY = 0x0082
-WM_ERASEBKGND = 0x0014
-WM_GETMINMAXINFO = 0x0024
+WM_NCCALCSIZE = 0x0083
+WM_NCHITTEST = 0x0084
+WM_NCPAINT = 0x0085
+WM_NCACTIVATE = 0x0086
+WM_GETDLGCODE = 0x0087
+WM_SYNCPAINT = 0x0088
+WM_NCMOUSEMOVE = 0x00A0
+WM_NCLBUTTONDOWN = 0x00A1
+WM_NCLBUTTONUP = 0x00A2
+WM_NCLBUTTONDBLCLK = 0x00A3
+WM_NCRBUTTONDOWN = 0x00A4
+WM_NCRBUTTONUP = 0x00A5
+WM_NCRBUTTONDBLCLK = 0x00A6
+WM_NCMBUTTONDOWN = 0x00A7
+WM_NCMBUTTONUP = 0x00A8
+WM_NCMBUTTONDBLCLK = 0x00A9
+WM_NCXBUTTONDOWN = 0x00AB
+WM_NCXBUTTONUP = 0x00AC
+WM_NCXBUTTONDBLCLK = 0x00AD
+WM_INPUT_DEVICE_CHANGE = 0x00FE
+WM_INPUT = 0x00FF
+WM_KEYDOWN = 0x0100 # Key down
+WM_KEYUP = 0x0101 # Key up
+WM_CHAR = 0x0102 # Character input
+WM_DEADCHAR = 0x0103
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
+WM_SYSCHAR = 0x0106
+WM_SYSDEADCHAR = 0x0107
+WM_UNICHAR = 0x0109
+WM_IME_STARTCOMPOSITION = 0x010D
+WM_IME_ENDCOMPOSITION = 0x010E
+WM_IME_COMPOSITION = 0x010F
+WM_INITDIALOG = 0x0110
+WM_COMMAND = 0x0111
+WM_SYSCOMMAND = 0x0112
+WM_TIMER = 0x0113
+WM_HSCROLL = 0x0114
+WM_VSCROLL = 0x0115
+WM_INITMENU = 0x0116
+WM_INITMENUPOPUP = 0x0117
+WM_MENUSELECT = 0x011F
+WM_MENUCHAR = 0x0120
+WM_ENTERIDLE = 0x0121
+WM_MENURBUTTONUP = 0x0122
+WM_MENUDRAG = 0x0123
+WM_MENUGETOBJECT = 0x0124
+WM_UNINITMENUPOPUP = 0x0125
+WM_MENUCOMMAND = 0x0126
+WM_CHANGEUISTATE = 0x0127
+WM_UPDATEUISTATE = 0x0128
+WM_QUERYUISTATE = 0x0129
+WM_CTLCOLORMSGBOX = 0x0132
+WM_CTLCOLOREDIT = 0x0133
+WM_CTLCOLORLISTBOX = 0x0134
+WM_CTLCOLORBTN = 0x0135
+WM_CTLCOLORDLG = 0x0136
+WM_CTLCOLORSCROLLBAR = 0x0137
+WM_CTLCOLORSTATIC = 0x0138
+WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
-WM_KEYDOWN = 0x0100
-WM_QUIT = 0x0012 # Для кода выхода
-# ... другие сообщения ...
+WM_LBUTTONUP = 0x0202
+WM_LBUTTONDBLCLK = 0x0203
+WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP = 0x0205
+WM_RBUTTONDBLCLK = 0x0206
+WM_MBUTTONDOWN = 0x0207
+WM_MBUTTONUP = 0x0208
+WM_MBUTTONDBLCLK = 0x0209
+WM_MOUSEWHEEL = 0x020A
+WM_XBUTTONDOWN = 0x020B
+WM_XBUTTONUP = 0x020C
+WM_XBUTTONDBLCLK = 0x020D
+WM_MOUSEHWHEEL = 0x020E
+WM_PARENTNOTIFY = 0x0210
+WM_ENTERMENULOOP = 0x0211
+WM_EXITMENULOOP = 0x0212
+WM_NEXTMENU = 0x0213
+WM_SIZING = 0x0214
+WM_CAPTURECHANGED = 0x0215
+WM_MOVING = 0x0216
+WM_POWERBROADCAST = 0x0218
+WM_DEVICECHANGE = 0x0219
+WM_MDICREATE = 0x0220
+WM_MDIDESTROY = 0x0221
+WM_MDIACTIVATE = 0x0222
+WM_MDIRESTORE = 0x0223
+WM_MDINEXT = 0x0224
+WM_MDIMAXIMIZE = 0x0225
+WM_MDITILE = 0x0226
+WM_MDICASCADE = 0x0227
+WM_MDIICONARRANGE = 0x0228
+WM_MDIGETACTIVE = 0x0229
+WM_MDISETMENU = 0x0230
+WM_ENTERSIZEMOVE = 0x0231
+WM_EXITSIZEMOVE = 0x0232
+WM_DROPFILES = 0x0233
+WM_MDIREFRESHMENU = 0x0234
+WM_IME_SETCONTEXT = 0x0281
+WM_IME_NOTIFY = 0x0282
+WM_IME_CONTROL = 0x0283
+WM_IME_COMPOSITIONFULL = 0x0284
+WM_IME_SELECT = 0x0285
+WM_IME_CHAR = 0x0286
+WM_IME_REQUEST = 0x0288
+WM_IME_KEYDOWN = 0x0290
+WM_IME_KEYUP = 0x0291
+WM_MOUSEHOVER = 0x02A1
+WM_MOUSELEAVE = 0x02A3
+WM_NCMOUSEHOVER = 0x02A0
+WM_NCMOUSELEAVE = 0x02A2
+WM_WTSSESSION_CHANGE = 0x02B1
+WM_TABLET_FIRST = 0x02C0
+WM_TABLET_LAST = 0x02DF
+WM_CUT = 0x0300
+WM_COPY = 0x0301
+WM_PASTE = 0x0302
+WM_CLEAR = 0x0303
+WM_UNDO = 0x0304
+WM_RENDERFORMAT = 0x0305
+WM_RENDERALLFORMATS = 0x0306
+WM_DESTROYCLIPBOARD = 0x0307
+WM_DRAWCLIPBOARD = 0x0308
+WM_PAINTCLIPBOARD = 0x0309
+WM_VSCROLLCLIPBOARD = 0x030A
+WM_SIZECLIPBOARD = 0x030B
+WM_ASKCBFORMATNAME = 0x030C
+WM_CHANGECBCHAIN = 0x030D
+WM_HSCROLLCLIPBOARD = 0x030E
+WM_QUERYNEWPALETTE = 0x030F
+WM_PALETTEISCHANGING = 0x0310
+WM_PALETTECHANGED = 0x0311
+WM_HOTKEY = 0x0312
+WM_PRINT = 0x0317
+WM_PRINTCLIENT = 0x0318
+WM_APPCOMMAND = 0x0319
+WM_THEMECHANGED = 0x031A
+WM_CLIPBOARDUPDATE = 0x031D
+WM_DWMCOMPOSITIONCHANGED = 0x031E
+WM_DWMNCRENDERINGCHANGED = 0x031F
+WM_DWMCOLORIZATIONCOLORCHANGED = 0x0320
+WM_DWMWINDOWMAXIMIZEDCHANGE = 0x0321
+WM_GETTITLEBARINFOEX = 0x033F
+WM_HANDHELDFIRST = 0x0358
+WM_HANDHELDLAST = 0x035F
+WM_AFXFIRST = 0x0360
+WM_AFXLAST = 0x037F
+WM_PENWINFIRST = 0x0380
+WM_PENWINLAST = 0x038F
+WM_APP = 0x8000
+WM_USER = 0x0400
+
+# SIZE_* constants for WM_SIZE wparam
+SIZE_RESTORED = 0
+SIZE_MINIMIZED = 1
+SIZE_MAXIMIZED = 2
+SIZE_MAXSHOW = 3
+SIZE_MAXHIDE = 4
+
+# SHOWWINDOW constants (SW_*)
+SW_HIDE = 0
+SW_SHOWNORMAL = 1
+SW_NORMAL = 1
+SW_SHOWMINIMIZED = 2
+SW_SHOWMAXIMIZED = 3
+SW_MAXIMIZE = 3
+SW_SHOWNOACTIVATE = 4
+SW_SHOW = 5
+SW_MINIMIZE = 6
+SW_SHOWMINNOACTIVE = 7
+SW_SHOWNA = 8
+SW_RESTORE = 9
+SW_SHOWDEFAULT = 10
+SW_FORCEMINIMIZE = 11
+
+# SetWindowPos Flags (SWP_*)
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOREDRAW = 0x0008
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+SWP_SHOWWINDOW = 0x0040
+SWP_HIDEWINDOW = 0x0080
+SWP_NOCOPYBITS = 0x0100
+SWP_NOOWNERZORDER = 0x0200
+SWP_NOSENDCHANGING = 0x0400
+SWP_DEFERERASE = 0x2000
+SWP_ASYNCWINDOWPOS = 0x4000
+
+# SetWindowPos HWND values for z-order
+HWND_TOP = 0
+HWND_BOTTOM = 1
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+
+# GetSystemMetrics indices (SM_*)
+SM_CXSCREEN = 0
+SM_CYSCREEN = 1
+SM_CYCAPTION = 4
+SM_CXBORDER = 5
+SM_CYBORDER = 6
+SM_CXVSCROLL = 2
+SM_CYHSCROLL = 3
+SM_CYVSCROLL = 20
+SM_CXHSCROLL = 21
+# ... many more ...
+
+# Mouse key state flags (MK_*) for mouse messages wparam
+MK_LBUTTON = 0x0001
+MK_RBUTTON = 0x0002
+MK_SHIFT = 0x0004
+MK_CONTROL = 0x0008
+MK_MBUTTON = 0x0010
+MK_XBUTTON1 = 0x0020
+MK_XBUTTON2 = 0x0040
 
 # Стили класса окна (CS_*)
-CS_HREDRAW = 0x0002
 CS_VREDRAW = 0x0001
+CS_HREDRAW = 0x0002
 CS_DBLCLKS = 0x0008
-
-# Параметры ShowWindow (SW_*)
-SW_SHOWNORMAL = 1
-SW_SHOW = 5
+CS_OWNDC = 0x0020
+CS_CLASSDC = 0x0040
+CS_PARENTDC = 0x0080
+CS_NOCLOSE = 0x0200
+CS_SAVEBITS = 0x0800
+CS_BYTEALIGNCLIENT = 0x1000
+CS_BYTEALIGNWINDOW = 0x2000
+CS_GLOBALCLASS = 0x4000
+CS_IME = 0x00010000
+CS_DROPSHADOW = 0x00020000
 
 # Коды ошибок
 ERROR_CLASS_ALREADY_EXISTS = 1410
 
-# Позиционирование и размеры
-CW_USEDEFAULT = 0x80000000
-
 # Тип оконной процедуры
-WNDPROC = ctypes.WINFUNCTYPE(LPARAM, wintypes.HWND, wintypes.UINT, WPARAM, LPARAM)
+WNDPROC = ctypes.WINFUNCTYPE(LPARAM, HWND, UINT, WPARAM, LPARAM)
 
 # --- Структуры WinAPI ---
-# ... (без изменений) ...
 class WNDCLASSEXW(ctypes.Structure):
-    _fields_ = [("cbSize", wintypes.UINT),
-                ("style", wintypes.UINT),
-                ("lpfnWndProc", WNDPROC), # Используем WNDPROC
-                ("cbClsExtra", wintypes.INT),
-                ("cbWndExtra", wintypes.INT),
-                ("hInstance", wintypes.HINSTANCE),
-                ("hIcon", HICON),
-                ("hCursor", HCURSOR),
-                ("hbrBackground", HBRUSH),
-                ("lpszMenuName", wintypes.LPCWSTR),
-                ("lpszClassName", wintypes.LPCWSTR),
-                ("hIconSm", HICON)]
-
-class POINT(ctypes.Structure):
-    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+    _fields_ = [("cbSize", UINT), ("style", UINT), ("lpfnWndProc", WNDPROC),
+                ("cbClsExtra", INT), ("cbWndExtra", INT), ("hInstance", HINSTANCE),
+                ("hIcon", HICON), ("hCursor", HCURSOR), ("hbrBackground", HBRUSH),
+                ("lpszMenuName", LPCWSTR), ("lpszClassName", LPCWSTR), ("hIconSm", HICON)]
 
 class MSG(ctypes.Structure):
-    _fields_ = [("hwnd", wintypes.HWND),
-                ("message", wintypes.UINT),
-                ("wParam", WPARAM), # Используем WPARAM
-                ("lParam", LPARAM), # Используем LPARAM
-                ("time", wintypes.DWORD),
-                ("pt", POINT)]
+    _fields_ = [("hwnd", HWND), ("message", UINT), ("wParam", WPARAM),
+                ("lParam", LPARAM), ("time", DWORD), ("pt", POINT)]
 
 class PAINTSTRUCT(ctypes.Structure):
-     _fields_ = [("hdc", wintypes.HDC),
-                 ("fErase", wintypes.BOOL),
-                 ("rcPaint", wintypes.RECT),
-                 ("fRestore", wintypes.BOOL),
-                 ("fIncUpdate", wintypes.BOOL),
-                 ("rgbReserved", wintypes.BYTE * 32)]
-
-class RECT(wintypes.RECT): pass
+     _fields_ = [("hdc", HDC), ("fErase", BOOL), ("rcPaint", RECT),
+                 ("fRestore", BOOL), ("fIncUpdate", BOOL),
+                 ("rgbReserved", BYTE * 32)]
 
 class CREATESTRUCTW(ctypes.Structure):
-    _fields_ = [("lpCreateParams", wintypes.LPVOID), # На самом деле это LPARAM, но LPVOID тоже подходит
-                ("hInstance", wintypes.HINSTANCE),
-                ("hMenu", wintypes.HMENU),
-                ("hwndParent", wintypes.HWND),
-                ("cy", wintypes.INT),
-                ("cx", wintypes.INT),
-                ("y", wintypes.INT),
-                ("x", wintypes.INT),
-                ("style", wintypes.DWORD), # Используем DWORD для стиля
-                ("lpszName", wintypes.LPCWSTR),
-                ("lpszClass", wintypes.LPCWSTR),
-                ("dwExStyle", wintypes.DWORD)]
+    _fields_ = [("lpCreateParams", LPVOID), ("hInstance", HINSTANCE), ("hMenu", HMENU),
+                ("hwndParent", HWND), ("cy", INT), ("cx", INT),
+                ("y", INT), ("x", INT), ("style", DWORD),
+                ("lpszName", LPCWSTR), ("lpszClass", LPCWSTR), ("dwExStyle", DWORD)]
 
 class MINMAXINFO(ctypes.Structure):
     _fields_ = [("ptReserved", POINT), ("ptMaxSize", POINT), ("ptMaxPosition", POINT),
                 ("ptMinTrackSize", POINT), ("ptMaxTrackSize", POINT)]
 
-
-# --- Загрузка DLL и прототипов функций ---
-# ... (без изменений, но убедитесь, что все argtypes/restype на месте) ...
+# --- Загрузка DLL ---
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 gdi32 = ctypes.windll.gdi32
 
-# user32
-DefWindowProcW = user32.DefWindowProcW
-DefWindowProcW.restype = LPARAM
-DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, WPARAM, LPARAM]
-
-RegisterClassExW = user32.RegisterClassExW
-RegisterClassExW.restype = wintypes.ATOM
-RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
-
-CreateWindowExW = user32.CreateWindowExW
-CreateWindowExW.restype = wintypes.HWND
-CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
-                           wintypes.INT, wintypes.INT, wintypes.INT, wintypes.INT,
-                           wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID] # lpParam это LPARAM/void*
-
-GetMessageW = user32.GetMessageW
-GetMessageW.restype = wintypes.BOOL
-GetMessageW.argtypes = [ctypes.POINTER(MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
-
-TranslateMessage = user32.TranslateMessage
-TranslateMessage.restype = wintypes.BOOL
-TranslateMessage.argtypes = [ctypes.POINTER(MSG)]
-
-DispatchMessageW = user32.DispatchMessageW
-DispatchMessageW.restype = LPARAM
-DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
-
-PostQuitMessage = user32.PostQuitMessage
-PostQuitMessage.restype = None
-PostQuitMessage.argtypes = [wintypes.INT]
-
-DestroyWindow = user32.DestroyWindow
-DestroyWindow.restype = wintypes.BOOL
-DestroyWindow.argtypes = [wintypes.HWND]
-
-ShowWindow = user32.ShowWindow
-ShowWindow.restype = wintypes.BOOL
-ShowWindow.argtypes = [wintypes.HWND, wintypes.INT]
-
-UpdateWindow = user32.UpdateWindow
-UpdateWindow.restype = wintypes.BOOL
-UpdateWindow.argtypes = [wintypes.HWND]
-
-LoadImageW = user32.LoadImageW
-LoadImageW.restype = wintypes.HANDLE
-LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
-                       wintypes.INT, wintypes.INT, wintypes.UINT]
-IMAGE_ICON = 1
-IMAGE_CURSOR = 2
-LR_DEFAULTSIZE = 0x0040 # Changed from 0x40 to match header definition style
-LR_SHARED = 0x8000
-
-BeginPaint = user32.BeginPaint
-BeginPaint.restype = wintypes.HDC
-BeginPaint.argtypes = [wintypes.HWND, ctypes.POINTER(PAINTSTRUCT)]
-
-EndPaint = user32.EndPaint
-EndPaint.restype = wintypes.BOOL
-EndPaint.argtypes = [wintypes.HWND, ctypes.POINTER(PAINTSTRUCT)]
-
-GetClientRect = user32.GetClientRect
-GetClientRect.restype = wintypes.BOOL
-GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
-
-DrawTextW = user32.DrawTextW
-DrawTextW.restype = wintypes.INT
-DrawTextW.argtypes = [wintypes.HDC, wintypes.LPCWSTR, wintypes.INT, ctypes.POINTER(RECT), wintypes.UINT]
-
-PostMessageW = user32.PostMessageW
-PostMessageW.restype = wintypes.BOOL
-PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, WPARAM, LPARAM]
-
-SetWindowLongPtr.restype = LONG_PTR
-SetWindowLongPtr.argtypes = [wintypes.HWND, wintypes.INT, LONG_PTR]
-
-GetWindowLongPtr.restype = LONG_PTR
-GetWindowLongPtr.argtypes = [wintypes.HWND, wintypes.INT]
-
-InvalidateRect = user32.InvalidateRect
-InvalidateRect.restype = wintypes.BOOL
-# lpRect can be NULL (LPVOID or POINTER(RECT)), but using POINTER is safer
-InvalidateRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT), wintypes.BOOL]
-
-MessageBoxW = user32.MessageBoxW
-MessageBoxW.restype = wintypes.INT
-MessageBoxW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
-
-GetSysColor = user32.GetSysColor
-GetSysColor.restype = wintypes.DWORD
-GetSysColor.argtypes = [wintypes.INT]
-
-GetSysColorBrush = user32.GetSysColorBrush
-GetSysColorBrush.restype = HBRUSH
-GetSysColorBrush.argtypes = [wintypes.INT]
-
+# --- Установка прототипов функций ---
 # kernel32
-GetModuleHandleW = kernel32.GetModuleHandleW
-GetModuleHandleW.restype = wintypes.HINSTANCE
-GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+GetModuleHandleW = kernel32.GetModuleHandleW; GetModuleHandleW.restype=HINSTANCE; GetModuleHandleW.argtypes=[LPCWSTR]
+GetLastError = kernel32.GetLastError; GetLastError.restype=DWORD; GetLastError.argtypes=[]
+SetLastError = kernel32.SetLastError; SetLastError.restype=None; SetLastError.argtypes=[DWORD] # Полезно иногда сбрасывать
+FormatMessageW = kernel32.FormatMessageW
+FormatMessageW.restype = DWORD
+FormatMessageW.argtypes = [DWORD, LPVOID, DWORD, DWORD, LPCWSTR, DWORD, LPVOID]
+FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x00000100
+FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000
+FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200
 
-GetLastError = kernel32.GetLastError
-GetLastError.restype = wintypes.DWORD
-GetLastError.argtypes = []
+# user32
+DefWindowProcW = user32.DefWindowProcW; DefWindowProcW.restype=LPARAM; DefWindowProcW.argtypes=[HWND,UINT,WPARAM,LPARAM]
+RegisterClassExW = user32.RegisterClassExW; RegisterClassExW.restype=wintypes.ATOM; RegisterClassExW.argtypes=[ctypes.POINTER(WNDCLASSEXW)]
+CreateWindowExW = user32.CreateWindowExW; CreateWindowExW.restype=HWND; CreateWindowExW.argtypes=[DWORD,LPCWSTR,LPCWSTR,DWORD,INT,INT,INT,INT,HWND,HMENU,HINSTANCE,LPVOID]
+GetMessageW = user32.GetMessageW; GetMessageW.restype=BOOL; GetMessageW.argtypes=[ctypes.POINTER(MSG),HWND,UINT,UINT]
+TranslateMessage = user32.TranslateMessage; TranslateMessage.restype=BOOL; TranslateMessage.argtypes=[ctypes.POINTER(MSG)]
+DispatchMessageW = user32.DispatchMessageW; DispatchMessageW.restype=LPARAM; DispatchMessageW.argtypes=[ctypes.POINTER(MSG)]
+PostQuitMessage = user32.PostQuitMessage; PostQuitMessage.restype=None; PostQuitMessage.argtypes=[INT]
+DestroyWindow = user32.DestroyWindow; DestroyWindow.restype=BOOL; DestroyWindow.argtypes=[HWND]
+ShowWindow = user32.ShowWindow; ShowWindow.restype=BOOL; ShowWindow.argtypes=[HWND,INT]
+UpdateWindow = user32.UpdateWindow; UpdateWindow.restype=BOOL; UpdateWindow.argtypes=[HWND]
+LoadImageW = user32.LoadImageW; LoadImageW.restype=wintypes.HANDLE; LoadImageW.argtypes=[HINSTANCE,LPCWSTR,UINT,INT,INT,UINT]
+BeginPaint = user32.BeginPaint; BeginPaint.restype=HDC; BeginPaint.argtypes=[HWND,ctypes.POINTER(PAINTSTRUCT)]
+EndPaint = user32.EndPaint; EndPaint.restype=BOOL; EndPaint.argtypes=[HWND,ctypes.POINTER(PAINTSTRUCT)]
+GetClientRect = user32.GetClientRect; GetClientRect.restype=BOOL; GetClientRect.argtypes=[HWND,ctypes.POINTER(RECT)]
+GetWindowRect = user32.GetWindowRect; GetWindowRect.restype=BOOL; GetWindowRect.argtypes=[HWND,ctypes.POINTER(RECT)]
+DrawTextW = user32.DrawTextW; DrawTextW.restype=INT; DrawTextW.argtypes=[HDC,LPCWSTR,INT,ctypes.POINTER(RECT),UINT]
+PostMessageW = user32.PostMessageW; PostMessageW.restype=BOOL; PostMessageW.argtypes=[HWND,UINT,WPARAM,LPARAM]
+SendMessageW = user32.SendMessageW; SendMessageW.restype=LPARAM; SendMessageW.argtypes=[HWND,UINT,WPARAM,LPARAM] # Синхронная отправка
+SetWindowLongPtrW.restype = LONG_PTR; SetWindowLongPtrW.argtypes = [HWND,INT,LONG_PTR]
+GetWindowLongPtrW.restype = LONG_PTR; GetWindowLongPtrW.argtypes = [HWND,INT]
+InvalidateRect = user32.InvalidateRect; InvalidateRect.restype=BOOL; InvalidateRect.argtypes=[HWND,ctypes.POINTER(RECT),BOOL]
+ValidateRect = user32.ValidateRect; ValidateRect.restype=BOOL; ValidateRect.argtypes=[HWND,ctypes.POINTER(RECT)] # Убирает область из обновления
+MessageBoxW = user32.MessageBoxW; MessageBoxW.restype=INT; MessageBoxW.argtypes=[HWND,LPCWSTR,LPCWSTR,UINT]
+GetSysColor = user32.GetSysColor; GetSysColor.restype=COLORREF; GetSysColor.argtypes=[INT]
+GetSysColorBrush = user32.GetSysColorBrush; GetSysColorBrush.restype=HBRUSH; GetSysColorBrush.argtypes=[INT]
+SetWindowTextW = user32.SetWindowTextW; SetWindowTextW.restype=BOOL; SetWindowTextW.argtypes=[HWND,LPCWSTR]
+GetWindowTextW = user32.GetWindowTextW; GetWindowTextW.restype=INT; GetWindowTextW.argtypes=[HWND,LPCWSTR,INT]
+GetWindowTextLengthW = user32.GetWindowTextLengthW; GetWindowTextLengthW.restype=INT; GetWindowTextLengthW.argtypes=[HWND]
+SetWindowPos = user32.SetWindowPos; SetWindowPos.restype=BOOL; SetWindowPos.argtypes=[HWND,HWND,INT,INT,INT,INT,UINT]
+EnableWindow = user32.EnableWindow; EnableWindow.restype=BOOL; EnableWindow.argtypes=[HWND,BOOL]
+IsWindowEnabled = user32.IsWindowEnabled; IsWindowEnabled.restype=BOOL; IsWindowEnabled.argtypes=[HWND]
+BringWindowToTop = user32.BringWindowToTop; BringWindowToTop.restype=BOOL; BringWindowToTop.argtypes=[HWND]
+SetForegroundWindow = user32.SetForegroundWindow; SetForegroundWindow.restype=BOOL; SetForegroundWindow.argtypes=[HWND]
+GetSystemMetrics = user32.GetSystemMetrics; GetSystemMetrics.restype=INT; GetSystemMetrics.argtypes=[INT]
+GetCursorPos = user32.GetCursorPos; GetCursorPos.restype=BOOL; GetCursorPos.argtypes=[ctypes.POINTER(POINT)]
+ScreenToClient = user32.ScreenToClient; ScreenToClient.restype=BOOL; ScreenToClient.argtypes=[HWND,ctypes.POINTER(POINT)]
+ClientToScreen = user32.ClientToScreen; ClientToScreen.restype=BOOL; ClientToScreen.argtypes=[HWND,ctypes.POINTER(POINT)]
+GetKeyState = user32.GetKeyState; GetKeyState.restype=wintypes.SHORT; GetKeyState.argtypes=[INT]
+GetAsyncKeyState = user32.GetAsyncKeyState; GetAsyncKeyState.restype=wintypes.SHORT; GetAsyncKeyState.argtypes=[INT]
+SetCapture = user32.SetCapture; SetCapture.restype=HWND; SetCapture.argtypes=[HWND]
+ReleaseCapture = user32.ReleaseCapture; ReleaseCapture.restype=BOOL; ReleaseCapture.argtypes=[]
+GetFocus = user32.GetFocus; GetFocus.restype=HWND; GetFocus.argtypes=[]
+SetFocus = user32.SetFocus; SetFocus.restype=HWND; SetFocus.argtypes=[HWND]
 
 # gdi32
-SetTextColor = gdi32.SetTextColor
-SetTextColor.restype = wintypes.COLORREF
-SetTextColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
+SetTextColor = gdi32.SetTextColor; SetTextColor.restype=COLORREF; SetTextColor.argtypes=[HDC,COLORREF]
+SetBkMode = gdi32.SetBkMode; SetBkMode.restype=INT; SetBkMode.argtypes=[HDC,INT]
+GetStockObject = gdi32.GetStockObject; GetStockObject.restype=HGDIOBJ; GetStockObject.argtypes=[INT]
+CreateSolidBrush = gdi32.CreateSolidBrush; CreateSolidBrush.restype=HBRUSH; CreateSolidBrush.argtypes=[COLORREF]
+DeleteObject = gdi32.DeleteObject; DeleteObject.restype=BOOL; DeleteObject.argtypes=[HGDIOBJ]
+# ... Add more GDI function prototypes as needed (CreatePen, SelectObject, etc.)
 
-SetBkMode = gdi32.SetBkMode
-SetBkMode.restype = wintypes.INT
-SetBkMode.argtypes = [wintypes.HDC, wintypes.INT]
+# Типы изображений для LoadImage
+IMAGE_BITMAP = 0
+IMAGE_ICON = 1
+IMAGE_CURSOR = 2
+# Флаги загрузки для LoadImage
+LR_DEFAULTCOLOR = 0x0000
+LR_MONOCHROME = 0x0001
+LR_COLOR = 0x0002
+LR_COPYRETURNORG = 0x0004
+LR_COPYDELETEORG = 0x0008
+LR_LOADFROMFILE = 0x0010
+LR_LOADTRANSPARENT = 0x0020
+LR_DEFAULTSIZE = 0x0040
+LR_VGACOLOR = 0x0080
+LR_LOADMAP3DCOLORS = 0x1000
+LR_CREATEDIBSECTION = 0x2000
+LR_COPYFROMRESOURCE = 0x4000
+LR_SHARED = 0x8000
 
-GetStockObject = gdi32.GetStockObject
-GetStockObject.restype = HGDIOBJ
-GetStockObject.argtypes = [wintypes.INT]
+# --- Вспомогательная функция для ошибок ---
+def get_last_error_message(error_code=None):
+    if error_code is None:
+        error_code = GetLastError()
+    if error_code == 0:
+        return "No error."
 
-CreateSolidBrush = gdi32.CreateSolidBrush
-CreateSolidBrush.restype = HBRUSH
-CreateSolidBrush.argtypes = [wintypes.COLORREF]
+    msg_buffer = ctypes.c_wchar_p() # Указатель на буфер будет выделен FormatMessageW
 
-DeleteObject = gdi32.DeleteObject
-DeleteObject.restype = wintypes.BOOL
-DeleteObject.argtypes = [HGDIOBJ]
+    bytes_written = FormatMessageW(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        None, # source
+        error_code, # message id
+        0, # language id (default user language)
+        ctypes.byref(msg_buffer), # output buffer
+        0, # minimum size
+        None # arguments
+    )
 
-# --- Глобальное временное хранилище и оконная процедура ---
-# ... (_pending_windows, _UniversalWndProc, _WndProcInstance - без изменений) ...
+    if bytes_written == 0 or not msg_buffer.value:
+        # Ошибка при получении текста ошибки
+        return f"WinAPI Error Code {error_code} (Could not format error message)"
+    else:
+        message = msg_buffer.value.strip()
+        # Освобождаем буфер, выделенный LocalAlloc через FormatMessageW
+        kernel32.LocalFree(msg_buffer)
+        return f"WinAPI Error Code {error_code}: {message}"
+
+def check_win_error(result, func, args):
+    """ Callback for ctypes functions to automatically raise WinError on failure.
+        Use with: func.errcheck = check_win_error
+        Only works reliably for functions that return 0 or FALSE on failure.
+    """
+    if not result:
+         error_code = GetLastError()
+         if error_code != 0:
+             raise ctypes.WinError(error_code)
+         # else: No error code set, might be a different type of failure?
+    return result # Return original result if success or no error code
+
+# Применение errcheck к некоторым функциям (пример, можно добавить к другим BOOL функциям):
+# SetWindowPos.errcheck = check_win_error
+# DestroyWindow.errcheck = check_win_error # Хотя она редко фейлит если HWND валиден
+# ShowWindow.errcheck = check_win_error
+# UpdateWindow.errcheck = check_win_error
+# InvalidateRect.errcheck = check_win_error
+
+
+# --- Глобальные переменные и оконная процедура ---
 _pending_windows = {}
+_window_classes = {} # Перенесем сюда из класса для простоты доступа
 
 # --- Оконная процедура (WndProc) ---
 def _UniversalWndProc(hwnd, msg, wparam, lparam):
-    """Generic Window Procedure using GWLP_USERDATA"""
+    """Универсальная оконная процедура"""
     instance = None
-    try: # Добавим общий try-except для отладки неожиданных ошибок в WndProc
-        # При первом создании окна (WM_NCCREATE), сохраняем указатель на объект Python
+    # Эта часть оптимизирована в предыдущем коде и должна быть корректна
+    # <...> (код связывания/разрыва связи через GWLP_USERDATA остался прежним)
+    try:
         if msg == WM_NCCREATE:
             try:
-                create_struct_ptr = ctypes.cast(lparam, ctypes.POINTER(CREATESTRUCTW))
-                if not create_struct_ptr:
-                     print("Error in WM_NCCREATE: lparam is NULL", file=sys.stderr)
-                     return -1 # FALSE
-
-                create_struct = create_struct_ptr.contents
-                instance_ptr_addr = create_struct.lpCreateParams # Адрес (id) объекта Python
-
+                cs = ctypes.cast(lparam, ctypes.POINTER(CREATESTRUCTW)).contents
+                instance_ptr_addr = cs.lpCreateParams
                 if instance_ptr_addr and instance_ptr_addr in _pending_windows:
                     instance = _pending_windows[instance_ptr_addr]
-                    old_value = SetWindowLongPtr(hwnd, GWLP_USERDATA, instance_ptr_addr)
-                    instance._hwnd = hwnd # Устанавливаем hwnd в объекте
-                    del _pending_windows[instance_ptr_addr] # Удаляем из временного хранилища
-                else:
-                    print(f"Error in WM_NCCREATE: Could not retrieve instance pointer addr {instance_ptr_addr} from _pending_windows", file=sys.stderr)
-                    return -1 # FALSE
-
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, instance_ptr_addr)
+                    instance._hwnd = hwnd
+                    del _pending_windows[instance_ptr_addr]
+                else: return -1 # Error
             except Exception as e:
-                print(f"Exception in WM_NCCREATE handling: {e}", file=sys.stderr)
+                print(f"Exception in WM_NCCREATE link: {e}", file=sys.stderr)
                 if 'instance_ptr_addr' in locals() and instance_ptr_addr and instance_ptr_addr in _pending_windows:
                    try: del _pending_windows[instance_ptr_addr]
                    except KeyError: pass
-                return -1 # FALSE
+                return -1 # Error
 
-        # Для всех последующих сообщений получаем указатель из данных окна
         else:
-            instance_ptr_addr = GetWindowLongPtr(hwnd, GWLP_USERDATA)
+            instance_ptr_addr = GetWindowLongPtrW(hwnd, GWLP_USERDATA)
             if instance_ptr_addr != 0:
-                try:
-                    instance = ctypes.cast(instance_ptr_addr, ctypes.py_object).value
-                except Exception as e:
-                    print(f"Exception retrieving instance from GWLP_USERDATA for HWND {hwnd}: {e}", file=sys.stderr)
-                    instance = None
+                try: instance = ctypes.cast(instance_ptr_addr, ctypes.py_object).value
+                except Exception: instance = None
 
-        # Если объект Python найден, вызываем его обработчик сообщений
+        # Вызов обработчика экземпляра
         result_from_handler = None
-        if instance:
+        if instance and hasattr(instance, 'handle_message'):
             try:
                 result_from_handler = instance.handle_message(hwnd, msg, wparam, lparam)
                 if result_from_handler is not None:
                     return result_from_handler
             except Exception as e:
-                print(f"Error in user message handler (instance.handle_message) for msg {msg}: {e}", file=sys.stderr)
-                # В случае ошибки передаем управление DefWindowProcW
-                pass
+                print(f"Error in instance message handler (msg {msg}): {e}", file=sys.stderr)
+                # traceback.print_exc() # For debugging
 
-        # Если экземпляр не найден ИЛИ обработчик вернул None, вызываем стандартную процедуру
+        # Вызов стандартного обработчика
         final_result = DefWindowProcW(hwnd, msg, wparam, lparam)
 
-        # Очистка GWLP_USERDATA при уничтожении окна
-        if msg == WM_NCDESTROY:
-            instance_ptr_addr = GetWindowLongPtr(hwnd, GWLP_USERDATA)
-            if instance_ptr_addr != 0:
-                try:
-                    instance_to_clear = ctypes.cast(instance_ptr_addr, ctypes.py_object).value
-                    if hasattr(instance_to_clear, '_clear_hwnd'):
-                        instance_to_clear._clear_hwnd()
-                except Exception: pass # Игнорируем, если объект уже недоступен
-                SetWindowLongPtr(hwnd, GWLP_USERDATA, 0)
+        # Очистка при WM_NCDESTROY
+        if msg == WM_NCDESTROY and instance_ptr_addr != 0:
+            try:
+                # print(f"WM_NCDESTROY: Clearing GWLP_USERDATA for HWND {hwnd}")
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) # Clear the link
+                if instance and hasattr(instance, '_clear_hwnd'):
+                    instance._clear_hwnd() # Notify instance
+            except Exception as e_nc:
+                 print(f"Error during WM_NCDESTROY cleanup for HWND {hwnd}: {e_nc}", file=sys.stderr)
 
         return final_result
 
-    except Exception as e:
-         print(f"FATAL ERROR in _UniversalWndProc (HWND={hwnd}, MSG={msg}): {e}", file=sys.stderr)
-         try:
-              return DefWindowProcW(hwnd, msg, wparam, lparam)
-         except Exception as e_def:
-              print(f"FATAL ERROR calling DefWindowProcW after error: {e_def}", file=sys.stderr)
-              return 0
+    except Exception as e_proc:
+        print(f"FATAL ERROR in _UniversalWndProc loop (HWND={hwnd}, MSG={msg}): {e_proc}", file=sys.stderr)
+        # traceback.print_exc() # For debugging
+        # Try to call DefWindowProc in case of error in our logic
+        try: return DefWindowProcW(hwnd, msg, wparam, lparam)
+        except Exception: return 0 # Last resort
 
 _WndProcInstance = WNDPROC(_UniversalWndProc)
 
 
-# --- Класс окна ---
+# --- Базовый класс окна ---
 class BaseWindow:
-    _window_classes = {}
+    """
+    Базовый класс для создания и управления окном приложения Windows.
+    Предоставляет методы для управления окном и колбэки для обработки событий.
+    """
+    # _window_classes = {} # Moved to global scope
 
-    def __init__(self, title="Application Window", width=CW_USEDEFAULT, height=CW_USEDEFAULT, x=CW_USEDEFAULT, y=CW_USEDEFAULT, parent_hwnd=None, menu=None, style=WS_OVERLAPPEDWINDOW, ex_style=WS_EX_APPWINDOW | WS_EX_WINDOWEDGE, class_name="PyWindowClass", class_style=CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS, background_brush=COLOR_WINDOW, icon_res=IDI_APPLICATION, cursor_res=IDC_ARROW, on_create=None, on_paint=None, on_destroy=None, on_close=None, on_size=None, on_lbuttondown=None, on_keydown=None):
-        # ... (инициализация без изменений) ...
+    def __init__(self,
+                 title="Application Window",
+                 width=CW_USEDEFAULT, height=CW_USEDEFAULT,
+                 x=CW_USEDEFAULT, y=CW_USEDEFAULT,
+                 parent=None, # Can be HWND or another BaseWindow instance
+                 menu=None,
+                 style=WS_OVERLAPPEDWINDOW,
+                 ex_style=WS_EX_APPWINDOW, # Removed WS_EX_WINDOWEDGE for flatter look
+                 class_name="PyWindowClass",
+                 class_style=CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
+                 # background: index (COLOR_*), COLORREF (0x00bbggrr), HBRUSH, or None (no background erase)
+                 background=COLOR_WINDOW,
+                 icon=IDI_APPLICATION, # int (IDI_*) or str (path to .ico)
+                 cursor=IDC_ARROW,   # int (IDC_*) or str (path to .cur)
+                 # Callbacks (Добавлены новые)
+                 on_create=None, on_paint=None, on_destroy=None, on_close=None,
+                 on_size=None, on_move=None,
+                 on_setfocus=None, on_killfocus=None,
+                 on_keydown=None, on_keyup=None, on_char=None, # Key events
+                 on_lbuttondown=None, on_lbuttonup=None, on_lbuttondblclk=None, # Left mouse
+                 on_rbuttondown=None, on_rbuttonup=None, on_rbuttondblclk=None, # Right mouse
+                 on_mbuttondown=None, on_mbuttonup=None, on_mbuttondblclk=None, # Middle mouse
+                 on_mousemove=None, on_mousewheel=None, on_mousehover=None, on_mouseleave=None # Other mouse
+                 # ... add more specific callbacks as needed (e.g., for WM_COMMAND)
+                 ):
         self._hwnd = None
-        self._hinstance = GetModuleHandleW(None) # Используем функцию с прототипом
-        if not self._hinstance:
-            raise ctypes.WinError(GetLastError())
+        self._hinstance = GetModuleHandleW(None)
+        if not self._hinstance: raise ctypes.WinError(GetLastError())
 
-        self.title = title
-        self.width = width
-        self.height = height
-        self.x = x
-        self.y = y
-        self.parent_hwnd = parent_hwnd
-        self.menu = menu
-        self.style = style
-        self.ex_style = ex_style
+        # Сохраняем параметры инициализации
+        self.initial_title = title
+        self.initial_x = x
+        self.initial_y = y
+        self.initial_width = width
+        self.initial_height = height
+        self.initial_style = style
+        self.initial_ex_style = ex_style
+        self.initial_class_name = class_name
+        self.initial_class_style = class_style
+        self.initial_background = background
+        self.initial_icon = icon
+        self.initial_cursor = cursor
 
-        # Параметры класса окна
-        self.class_name = class_name # Убрал id(self)
-        self.class_style = class_style
-        self.background_brush_ref = background_brush # Индекс цвета или HBRUSH
-        self.icon_res = icon_res
-        self.cursor_res = cursor_res
+        # Parent window
+        if isinstance(parent, BaseWindow):
+            self.parent_hwnd = parent.hwnd if parent.hwnd else None # HWND родителя
+        elif isinstance(parent, int) and parent != 0:
+            self.parent_hwnd = parent # HWND передан напрямую
+        else:
+            self.parent_hwnd = None
+
+        self.menu = menu # HMENU (пока не реализовано создание меню)
+
+        # Сохраняем ресурсы класса, чтобы не регистрировать каждый раз
+        self.class_atom = None
         self._hicon = None
         self._hcursor = None
-        self._hbrush_background = None
-        self._class_registered = False # Флаг, что класс был зарегистрирован
+        self._hbrush_background = None # Может быть кистью, созданной нами
+        self._is_custom_brush = False # Флаг, что кисть создана нами и требует DeleteObject
 
         # Колбэки
-        self.on_create = on_create
-        self.on_paint = on_paint
-        self.on_destroy = on_destroy
-        self.on_close = on_close
-        self.on_size = on_size
-        self.on_lbuttondown = on_lbuttondown
-        self.on_keydown = on_keydown
+        self.on_create = on_create; self.on_paint = on_paint; self.on_destroy = on_destroy; self.on_close = on_close;
+        self.on_size = on_size; self.on_move = on_move;
+        self.on_setfocus = on_setfocus; self.on_killfocus = on_killfocus;
+        self.on_keydown = on_keydown; self.on_keyup = on_keyup; self.on_char = on_char;
+        self.on_lbuttondown=on_lbuttondown; self.on_lbuttonup=on_lbuttonup; self.on_lbuttondblclk=on_lbuttondblclk;
+        self.on_rbuttondown=on_rbuttondown; self.on_rbuttonup=on_rbuttonup; self.on_rbuttondblclk=on_rbuttondblclk;
+        self.on_mbuttondown=on_mbuttondown; self.on_mbuttonup=on_mbuttonup; self.on_mbuttondblclk=on_mbuttondblclk;
+        self.on_mousemove=on_mousemove; self.on_mousewheel=on_mousewheel; self.on_mousehover=on_mousehover; self.on_mouseleave=on_mouseleave;
 
         self._self_addr = id(self)
-        _pending_windows[self._self_addr] = self
+        # Регистрация и создание окна теперь происходит в self.create() / self.run()
 
-        try:
-            self._register_class_if_needed()
-        except Exception as e:
-            if self._self_addr in _pending_windows:
-               try: del _pending_windows[self._self_addr]
-               except KeyError: pass
-            raise e
+    def _load_resource(self, res_id_or_path, res_type):
+        """Загружает иконку или курсор из ID, системных ID или файла."""
+        hinst = self._hinstance
+        flags = LR_DEFAULTSIZE | LR_SHARED
+        res_name = None
 
-    # ... (_load_resource, _get_background_brush, _register_class_if_needed, create, run - без изменений) ...
-    def _load_resource(self, resource_identifier, resource_type):
-        """Загружает иконку или курсор."""
-        if isinstance(resource_identifier, int):
-            lpszName = wintypes.LPCWSTR(resource_identifier)
-        elif isinstance(resource_identifier, str):
-            print(f"Warning: Loading resource from file '{resource_identifier}' not implemented.", file=sys.stderr)
-            # Fallback logic
-            fallback_id = IDI_APPLICATION if resource_type == IMAGE_ICON else IDC_ARROW
-            lpszName = wintypes.LPCWSTR(fallback_id)
-            # resource_identifier = fallback_id # Keep original for error message if needed
+        if isinstance(res_id_or_path, int):
+            res_name = LPCWSTR(res_id_or_path) # Используем MAKEINTRESOURCE
+            # Пытаемся загрузить из системных (hinst=None)
+            handle = LoadImageW(None, res_name, res_type, 0, 0, flags)
+            if handle: return handle
+            # Если не нашли, ищем в нашем инстансе
+            return LoadImageW(hinst, res_name, res_type, 0, 0, flags)
+
+        elif isinstance(res_id_or_path, str):
+            flags |= LR_LOADFROMFILE
+            res_name = LPCWSTR(res_id_or_path)
+            # TODO: Убедиться, что путь корректный и файл существует
+            return LoadImageW(None, res_name, res_type, 0, 0, flags) # hinst должен быть None для LR_LOADFROMFILE
+
         else:
-             return None
-
-        # Try loading as standard system resource first (NULL hInst)
-        handle = LoadImageW(None, lpszName, resource_type, 0, 0, LR_DEFAULTSIZE | LR_SHARED)
-        if not handle: # If not found in system resources, try loading from our module
-            handle = LoadImageW(self._hinstance, lpszName, resource_type, 0, 0, LR_DEFAULTSIZE | LR_SHARED)
-            if not handle:
-                 # Use the original identifier in the error message
-                 # print(f"Warning: Failed to load resource identifier {resource_identifier} (type {resource_type}). Error: {GetLastError()}", file=sys.stderr)
-                 return None
-        return handle
+            print(f"Warning: Invalid resource identifier type: {type(res_id_or_path)}. Cannot load.", file=sys.stderr)
+            return None # Не удалось определить ресурс
 
     def _get_background_brush(self):
-         """Получает HBRUSH для фона."""
-         if isinstance(self.background_brush_ref, HBRUSH) or isinstance(self.background_brush_ref, wintypes.HANDLE): # Allow raw HANDLE?
-              # Check if it's a valid handle? Maybe not necessary.
-              return self.background_brush_ref
-         elif isinstance(self.background_brush_ref, int):
-              hbrush = GetSysColorBrush(self.background_brush_ref)
-              if not hbrush:
-                   # print(f"Warning: GetSysColorBrush failed for index {self.background_brush_ref}. Error: {GetLastError()}. Using fallback.", file=sys.stderr)
-                   hbrush = GetSysColorBrush(COLOR_WINDOW)
-                   if not hbrush:
-                        hbrush = GetStockObject(WHITE_BRUSH)
-              return hbrush
-         else:
-              # print(f"Warning: Invalid background_brush_ref type: {type(self.background_brush_ref)}. Using fallback.", file=sys.stderr)
-              return GetSysColorBrush(COLOR_WINDOW)
+        """Создает или получает HBRUSH для фона. Устанавливает self._is_custom_brush."""
+        self._is_custom_brush = False # Сбрасываем флаг
+        bg_ref = self.initial_background
+
+        if bg_ref is None: # Нет фона (для кастомной отрисовки)
+            return None
+        elif isinstance(bg_ref, (HBRUSH, wintypes.HANDLE)): # Передали готовую кисть
+            return bg_ref
+        elif isinstance(bg_ref, int):
+             if 0 <= bg_ref <= 24: # Похоже на индекс COLOR_*
+                 hbrush = GetSysColorBrush(bg_ref)
+                 if hbrush: return hbrush
+                 else: # Ошибка получения системной кисти, используем запасной вариант
+                      print(f"Warning: Failed to get sys color brush for index {bg_ref}. Using COLOR_WINDOW.", file=sys.stderr)
+                      return GetSysColorBrush(COLOR_WINDOW)
+             else: # Похоже на COLORREF (0x00bbggrr)
+                  try:
+                      hbrush = CreateSolidBrush(COLORREF(bg_ref))
+                      if hbrush:
+                          self._is_custom_brush = True # Эту кисть нужно будет удалить
+                          return hbrush
+                      else: # Ошибка создания кисти
+                           print(f"Warning: Failed to create solid brush for color {bg_ref:#x}. Error: {get_last_error_message()}. Using COLOR_WINDOW.", file=sys.stderr)
+                           return GetSysColorBrush(COLOR_WINDOW)
+                  except Exception as e: # Ошибка преобразования в COLORREF
+                       print(f"Warning: Invalid color value for background {bg_ref}: {e}. Using COLOR_WINDOW.", file=sys.stderr)
+                       return GetSysColorBrush(COLOR_WINDOW)
+        else: # Неизвестный тип
+            print(f"Warning: Invalid background type: {type(bg_ref)}. Using COLOR_WINDOW.", file=sys.stderr)
+            return GetSysColorBrush(COLOR_WINDOW)
 
     def _register_class_if_needed(self):
-        """Регистрирует класс окна."""
-        if self.class_name in BaseWindow._window_classes:
-            class_info = BaseWindow._window_classes[self.class_name]
-            self._atom = class_info['atom']
-            self._hicon = class_info.get('hicon')
-            self._hcursor = class_info.get('hcursor')
-            self._hbrush_background = class_info.get('hbrush')
-            self._class_registered = True
-            return
+        """Регистрирует класс окна, если необходимо."""
+        global _window_classes
+        class_key = (self.initial_class_name, self._hinstance) # Ключ для уникальности
 
+        if class_key in _window_classes:
+            class_info = _window_classes[class_key]
+            self.class_atom = class_info['atom']
+            self._hicon = class_info['hicon']
+            self._hcursor = class_info['hcursor']
+            self._hbrush_background = class_info['hbrush']
+            self._is_custom_brush = class_info['is_custom_brush'] # Восстанавливаем флаг
+            # print(f"Reusing registered window class '{self.initial_class_name}'")
+            return True
+
+        # Регистрация нового класса
         wc = WNDCLASSEXW()
         wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-        wc.style = self.class_style
+        wc.style = self.initial_class_style
         wc.lpfnWndProc = _WndProcInstance
         wc.cbClsExtra = 0
         wc.cbWndExtra = 0
         wc.hInstance = self._hinstance
 
-        self._hicon = self._load_resource(self.icon_res, IMAGE_ICON)
-        self._hcursor = self._load_resource(self.cursor_res, IMAGE_CURSOR)
-        self._hbrush_background = self._get_background_brush()
+        # Загрузка ресурсов
+        self._hicon = self._load_resource(self.initial_icon, IMAGE_ICON)
+        self._hcursor = self._load_resource(self.initial_cursor, IMAGE_CURSOR)
+        self._hbrush_background = self._get_background_brush() # Устанавливает _is_custom_brush
 
-        # Use fallbacks during assignment if load failed
-        wc.hIcon = self._hicon if self._hicon else LoadImageW(None, wintypes.LPCWSTR(IDI_APPLICATION), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED)
-        wc.hCursor = self._hcursor if self._hcursor else LoadImageW(None, wintypes.LPCWSTR(IDC_ARROW), IMAGE_CURSOR, 0, 0, LR_DEFAULTSIZE | LR_SHARED)
-        wc.hbrBackground = self._hbrush_background if self._hbrush_background else GetSysColorBrush(COLOR_WINDOW)
-
+        # Установка в структуру (с фоллбэками)
+        wc.hIcon = self._hicon if self._hicon else self._load_resource(IDI_APPLICATION, IMAGE_ICON)
+        wc.hCursor = self._hcursor if self._hcursor else self._load_resource(IDC_ARROW, IMAGE_CURSOR)
+        wc.hbrBackground = self._hbrush_background # Может быть None
         wc.lpszMenuName = None
-        wc.lpszClassName = self.class_name
-        wc.hIconSm = self._hicon # Use same icon for small
+        wc.lpszClassName = LPCWSTR(self.initial_class_name)
+        wc.hIconSm = self._hicon # Используем ту же маленькую иконку
 
-        self._atom = RegisterClassExW(ctypes.byref(wc))
-        if not self._atom:
+        atom = RegisterClassExW(ctypes.byref(wc))
+        if not atom:
             error_code = GetLastError()
-            if error_code == ERROR_CLASS_ALREADY_EXISTS:
-                 # print(f"Warning or Info: Class '{self.class_name}' already registered (Error Code {error_code}).")
-                 self._class_registered = True # Assume it's there
-                 # Try to fetch existing resources? Not easily possible.
-                 # Just save what we intended. The first registration wins for resources.
-                 BaseWindow._window_classes[self.class_name] = {
-                    'atom': self._atom, # Actually 0 here, but doesn't matter
-                    'wndproc_instance': _WndProcInstance,
-                    'hicon': self._hicon, 'hcursor': self._hcursor, 'hbrush': self._hbrush_background
-                 }
-                 return
+            if error_code == ERROR_CLASS_ALREADY_EXISTS: # Маловероятно с class_key, но возможно
+                # print(f"Warning: Class '{self.initial_class_name}' already registered despite check (race?). Reusing.")
+                # Просто повторно попытаемся получить инфо (хотя атома нет)
+                self._register_class_if_needed() # Повторный вызов найдет в _window_classes
+                return self.class_atom is not None # Должен найти или вернуть False
             else:
-                 raise ctypes.WinError(error_code, f"Failed to register window class '{self.class_name}'")
+                raise ctypes.WinError(error_code, f"Failed to register window class '{self.initial_class_name}'")
 
-        self._class_registered = True
-        BaseWindow._window_classes[self.class_name] = {
-            'atom': self._atom,
-            'wndproc_instance': _WndProcInstance,
-            'hicon': self._hicon, 'hcursor': self._hcursor, 'hbrush': self._hbrush_background
+        self.class_atom = atom
+        # Сохраняем инфо для переиспользования
+        _window_classes[class_key] = {
+            'atom': atom,
+            'wndproc_instance': _WndProcInstance, # Держим ссылку на колбэк
+            'hicon': self._hicon,
+            'hcursor': self._hcursor,
+            'hbrush': self._hbrush_background,
+            'is_custom_brush': self._is_custom_brush # Сохраняем флаг
         }
-
+        # print(f"Window class '{self.initial_class_name}' registered (Atom: {atom}).")
+        return True
 
     def create(self):
-        if self._hwnd:
-            return True
-        if not self._class_registered:
-            try: self._register_class_if_needed()
-            except Exception as e:
-                 print(f"Error: Failed to register class during window creation: {e}", file=sys.stderr)
-                 return False
+        """Создает окно Windows. Вызывается автоматически при первом доступе к hwnd или в run()."""
+        if self._hwnd: return True # Окно уже создано
+
+        if not self._register_class_if_needed():
+            print("Error: Window class registration failed.", file=sys.stderr)
+            return False
+
+        # Помещаем себя в ожидание перед вызовом CreateWindowExW
         if self._self_addr not in _pending_windows:
-             _pending_windows[self._self_addr] = self
+            _pending_windows[self._self_addr] = self
 
         local_hwnd = CreateWindowExW(
-            self.ex_style, self.class_name, self.title, self.style,
-            self.x, self.y, self.width, self.height,
-            self.parent_hwnd, self.menu, self._hinstance,
-            ctypes.c_void_p(self._self_addr)
+            self.initial_ex_style,
+            self.initial_class_name, # Имя класса
+            self.initial_title,      # Заголовок окна
+            self.initial_style,      # Стиль окна
+            self.initial_x, self.initial_y,
+            self.initial_width, self.initial_height,
+            self.parent_hwnd,        # Родительское окно
+            self.menu,               # Меню
+            self._hinstance,
+            ctypes.c_void_p(self._self_addr) # Передаем id(self) для связи в WndProc
         )
 
+        # Проверка результата создания и установки self._hwnd через _UniversalWndProc
         if not local_hwnd:
             error_code = GetLastError()
-            if self._self_addr in _pending_windows:
-               try: del _pending_windows[self._self_addr]
-               except KeyError: pass
-            raise ctypes.WinError(error_code, "Failed to create window (CreateWindowExW failed)")
-
-        if not self._hwnd or self._hwnd != local_hwnd:
-            print(f"Error: Window handle mismatch or not set after creation. HWND from Create={local_hwnd}, self._hwnd={self._hwnd}", file=sys.stderr)
-            if local_hwnd:
-                DestroyWindow(local_hwnd)
-            if self._self_addr in _pending_windows:
+            if self._self_addr in _pending_windows: # Убрать из ожидания при ошибке
                 try: del _pending_windows[self._self_addr]
                 except KeyError: pass
-            return False
+            raise ctypes.WinError(error_code, "Failed to create window (CreateWindowExW failed)")
+
+        # _hwnd должен был быть установлен в WM_NCCREATE
+        if not self._hwnd or self._hwnd != local_hwnd:
+             msg = f"Window handle mismatch or not set after CreateWindowExW. API handle={local_hwnd}, internal handle={self._hwnd}"
+             print(f"Error: {msg}", file=sys.stderr)
+             if local_hwnd: # Попытка уничтожить "осиротевшее" окно
+                 try: DestroyWindow(local_hwnd)
+                 except Exception as e_dest: print(f"Error destroying orphaned window {local_hwnd}: {e_dest}")
+             if self._self_addr in _pending_windows:
+                try: del _pending_windows[self._self_addr]
+                except KeyError: pass
+             raise RuntimeError(msg) # Прерываем выполнение, это критично
+
+        # print(f"Window HWND={self._hwnd} created successfully.")
         return True
 
     def run(self):
+        """Запускает цикл обработки сообщений для окна."""
         if not self._hwnd:
             if not self.create():
-                print("Failed to run: Window creation failed.", file=sys.stderr)
-                return -1 # Error code
+                print("Error: Failed to run because window creation failed.", file=sys.stderr)
+                return -1 # Код ошибки
 
-        ShowWindow(self._hwnd, SW_SHOW)
-        UpdateWindow(self._hwnd)
+        # Показываем окно перед циклом сообщений
+        self.show() # Используем наш метод show
+        # UpdateWindow(self._hwnd) # Обычно не нужен после ShowWindow(SW_SHOW)
 
+        # Цикл сообщений
         msg = MSG()
         lpmsg = ctypes.byref(msg)
+        exit_code = 0
 
         while True:
+            # Использовать GetMessage для блокирующего ожидания
             ret = GetMessageW(lpmsg, None, 0, 0)
-            if ret == -1:
+
+            if ret == -1: # Ошибка GetMessage
                 error_code = GetLastError()
-                print(f"Error in GetMessage loop: {error_code} - {ctypes.WinError(error_code)}", file=sys.stderr)
-                return error_code
-            elif ret == 0:
-                exit_code = 0
-                # WPARAM is ULONG_PTR. Check type before accessing .value
-                if isinstance(msg.wParam, ULONG_PTR):
-                    exit_code = msg.wParam.value
-                elif isinstance(msg.wParam, int): # Should be covered by ULONG_PTR on 64bit or ULONG on 32bit?
-                    exit_code = msg.wParam
-                # else default 0
-                return exit_code
-            else:
+                print(f"Error in GetMessage loop: {get_last_error_message(error_code)}", file=sys.stderr)
+                exit_code = -1 # Или error_code?
+                break
+            elif ret == 0: # WM_QUIT получено
+                exit_code = msg.wParam.value if isinstance(msg.wParam, ULONG_PTR) else msg.wParam
+                # print(f"WM_QUIT received. Exiting loop with code {exit_code}.")
+                break
+            else: # Обычное сообщение
+                # TODO: Add hook for TranslateAccelerator here if needed for menus/dialogs
                 TranslateMessage(lpmsg)
                 DispatchMessageW(lpmsg)
 
+        return exit_code
+
 
     def handle_message(self, hwnd, msg, wparam, lparam):
-        """Диспетчер сообщений, вызывающий колбэки."""
+        """Центральный обработчик сообщений окна, вызывает соответствующие колбэки."""
+        # Вспомогательные переменные
+        res = None # Результат от колбэка
 
-        if msg == WM_CREATE:
-            if self.on_create: return self.on_create(hwnd)
-            return 0
+        try: # Обертка для ловли ошибок внутри конкретного обработчика колбэка
+            # --- Обработка сообщений и вызов колбэков ---
+            if msg == WM_CREATE:
+                 if self.on_create: res = self.on_create(hwnd)
+                 return res if res is not None else 0 # Успех по умолчанию
+            elif msg == WM_PAINT:
+                 if self.on_paint:
+                     ps = PAINTSTRUCT(); hdc = BeginPaint(hwnd, ctypes.byref(ps))
+                     if hdc:
+                         try: self.on_paint(hwnd, hdc)
+                         finally: EndPaint(hwnd, ctypes.byref(ps))
+                     return 0 # Обработано
+                 else: return None # Нет колбэка -> DefWindowProc
+            elif msg == WM_CLOSE:
+                 should_close = True
+                 if self.on_close: should_close = self.on_close(hwnd)
+                 if should_close: DestroyWindow(hwnd)
+                 return 0 # WM_CLOSE обработан в любом случае
+            elif msg == WM_DESTROY:
+                 exit_code = 0
+                 if self.on_destroy: res = self.on_destroy(hwnd)
+                 if res is not None: exit_code = res
+                 PostQuitMessage(exit_code)
+                 # Здесь НЕЛЬЗЯ обнулять self._hwnd, это делает WM_NCDESTROY
+                 return 0 # WM_DESTROY обработан
+            elif msg == WM_MOVE:
+                 if self.on_move:
+                     x = LOWORD(lparam); y = HIWORD(lparam)
+                     self.on_move(hwnd, x, y) # Координаты клиентской области относительно родителя или экрана
+                 return 0 # Обычно не требует возврата, передача дальше не повредит
+            elif msg == WM_SIZE:
+                 if self.on_size:
+                     w = LOWORD(lparam); h = HIWORD(lparam); st = wparam # Ширина, высота, тип (SIZE_*)
+                     self.on_size(hwnd, w, h, st)
+                 return 0 # Обычно обработано
+            elif msg == WM_SETFOCUS:
+                 if self.on_setfocus: res = self.on_setfocus(hwnd) # wparam=HWND окна, потерявшего фокус
+                 return res # None по умолчанию (передать дальше)
+            elif msg == WM_KILLFOCUS:
+                 if self.on_killfocus: res = self.on_killfocus(hwnd) # wparam=HWND окна, получающего фокус
+                 return res # None по умолчанию (передать дальше)
 
-        elif msg == WM_PAINT:
-            if self.on_paint:
-                ps = PAINTSTRUCT()
-                hdc = BeginPaint(hwnd, ctypes.byref(ps))
-                if hdc:
-                    try: self.on_paint(hwnd, hdc)
-                    finally: EndPaint(hwnd, ctypes.byref(ps))
-                return 0
-            return None
+            # Клавиатура
+            elif msg == WM_KEYDOWN or msg == WM_SYSKEYDOWN:
+                 if self.on_keydown: res = self.on_keydown(hwnd, wparam, lparam) # wparam=vk_code, lparam=flags
+                 return res # Колбэк решает, передавать ли дальше
+            elif msg == WM_KEYUP or msg == WM_SYSKEYUP:
+                 if self.on_keyup: res = self.on_keyup(hwnd, wparam, lparam)
+                 return res
+            elif msg == WM_CHAR or msg == WM_SYSCHAR:
+                 if self.on_char: res = self.on_char(hwnd, wparam, lparam) # wparam=char_code, lparam=flags
+                 return res
 
-        elif msg == WM_ERASEBKGND: return None
+            # Мышь - Клиентская область
+            elif msg == WM_MOUSEMOVE:
+                 if self.on_mousemove:
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam # Координаты, флаги клавиш (MK_*)
+                     res = self.on_mousemove(hwnd, x, y, k)
+                 return res # Колбэк решает
+            elif msg == WM_LBUTTONDOWN:
+                 if self.on_lbuttondown:
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam
+                     res = self.on_lbuttondown(hwnd, x, y, k)
+                 return res
+            elif msg == WM_LBUTTONUP:
+                 if self.on_lbuttonup:
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam
+                     res = self.on_lbuttonup(hwnd, x, y, k)
+                 return res
+            elif msg == WM_LBUTTONDBLCLK:
+                 if self.on_lbuttondblclk:
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam
+                     res = self.on_lbuttondblclk(hwnd, x, y, k)
+                 return res
+            elif msg == WM_RBUTTONDOWN:
+                 if self.on_rbuttondown:
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam
+                     res = self.on_rbuttondown(hwnd, x, y, k)
+                 return res
+            elif msg == WM_RBUTTONUP:
+                 if self.on_rbuttonup:
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam
+                     res = self.on_rbuttonup(hwnd, x, y, k)
+                 return res
+            elif msg == WM_RBUTTONDBLCLK:
+                 if self.on_rbuttondblclk:
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam
+                     res = self.on_rbuttondblclk(hwnd, x, y, k)
+                 return res
+            elif msg == WM_MBUTTONDOWN:
+                 if self.on_mbuttondown:
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam
+                     res = self.on_mbuttondown(hwnd, x, y, k)
+                 return res
+            elif msg == WM_MBUTTONUP:
+                 if self.on_mbuttonup:
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam
+                     res = self.on_mbuttonup(hwnd, x, y, k)
+                 return res
+            elif msg == WM_MBUTTONDBLCLK:
+                 if self.on_mbuttondblclk:
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam
+                     res = self.on_mbuttondblclk(hwnd, x, y, k)
+                 return res
+            elif msg == WM_MOUSEWHEEL: # Вертикальное колесо
+                 if self.on_mousewheel:
+                     delta = GET_WHEEL_DELTA_WPARAM(wparam) # Знаковое значение прокрутки
+                     keys = GET_KEYSTATE_WPARAM(wparam) # Флаги MK_*
+                     x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam) # Экранные координаты!
+                     # Преобразуем в клиентские
+                     pt = POINT(x,y); ScreenToClient(hwnd, ctypes.byref(pt))
+                     res = self.on_mousewheel(hwnd, pt.x, pt.y, delta, keys)
+                 return res
+            # TODO: Добавить WM_MOUSEHWHEEL для горизонтального колеса
 
-        elif msg == WM_CLOSE:
-            should_close = True
-            if self.on_close: should_close = self.on_close(hwnd)
-            if should_close: DestroyWindow(hwnd)
-            return 0
+            elif msg == WM_MOUSEHOVER:
+                if self.on_mousehover:
+                    x = GET_X_LPARAM(lparam); y = GET_Y_LPARAM(lparam); k = wparam
+                    res = self.on_mousehover(hwnd, x, y, k)
+                 # Требует TrackMouseEvent для активации
+                return res
+            elif msg == WM_MOUSELEAVE:
+                 if self.on_mouseleave: res = self.on_mouseleave(hwnd)
+                 # Требует TrackMouseEvent для активации
+                 return res
 
-        elif msg == WM_DESTROY:
-            exit_code = 0
-            if self.on_destroy:
-                res = self.on_destroy(hwnd)
-                if res is not None: exit_code = res
-            PostQuitMessage(exit_code)
-            return 0
+            # Другие важные сообщения
+            elif msg == WM_GETMINMAXINFO:
+                 # TODO: Add on_getminmaxinfo callback
+                 return 0 # По умолчанию обработано
 
-        elif msg == WM_SIZE:
-            if self.on_size:
-                width = LOWORD(lparam)    # <<< ИСПОЛЬЗУЕМ LOWORD
-                height = HIWORD(lparam)   # <<< ИСПОЛЬЗУЕМ HIWORD
-                resize_type = wparam      # WPARAM содержит тип изменения размера (SIZE_*)
-                self.on_size(hwnd, width, height, resize_type)
-            # Возврат 0 может быть важен, если дочерние окна должны сами обрабатывать WM_SIZE
-            return 0
+            elif msg == WM_ERASEBKGND:
+                 # Если есть фоновая кисть у класса (wc.hbrBackground != NULL),
+                 # то DefWindowProc сама закрасит фон и вернет ненулевое значение.
+                 # Если колбэк on_paint хочет сам рисовать фон (и избегать мерцания),
+                 # он может установить background=None и обрабатывать WM_PAINT.
+                 # Либо можно перехватить здесь и вернуть 1, если фон не нужен.
+                 return None # По умолчанию - пусть DefWindowProc разбирается
 
-        elif msg == WM_LBUTTONDOWN:
-            if self.on_lbuttondown:
-                x = LOWORD(lparam)        # <<< ИСПОЛЬЗУЕМ LOWORD
-                y = HIWORD(lparam)        # <<< ИСПОЛЬЗУЕМ HIWORD
-                flags = wparam            # WPARAM содержит флаги состояния клавиш (MK_*)
-                return self.on_lbuttondown(hwnd, x, y, flags) # Колбэк решает, возвращать ли None
-            return None
+        except Exception as e:
+            # Ловим ошибку в колбэке пользователя, чтобы не уронить всю оконную процедуру
+            print(f"Error processing message {msg} in Python callback: {e}", file=sys.stderr)
+            # traceback.print_exc() # Опционально для отладки
+            # В случае ошибки в колбэке, обычно лучше передать управление DefWindowProc
+            # чтобы система вела себя предсказуемо, поэтому возвращаем None.
 
-        elif msg == WM_KEYDOWN:
-            if self.on_keydown:
-                vk_code = wparam          # WPARAM содержит виртуальный код клавиши
-                # lparam содержит флаги: repeat count, scan code, extended key, context code, previous key state, transition state
-                key_flags = lparam
-                return self.on_keydown(hwnd, vk_code, key_flags) # Колбэк решает, возвращать ли None
-            return None
-
-        elif msg == WM_GETMINMAXINFO: return 0
-
-        # --- Другие сообщения ---
+        # Если сообщение не было обработано ни одним колбэком, возвращаем None
+        # _UniversalWndProc передаст управление DefWindowProcW
         return None
 
+    # --- Методы для управления окном ---
+    @property
+    def hwnd(self):
+        """Дескриптор окна (HWND). Окно будет создано при первом доступе, если не было создано ранее."""
+        if not self._hwnd:
+            # print("Accessing hwnd property, attempting to create window...")
+            self.create() # Попытка создать окно
+            if not self._hwnd: # Проверка после попытки создания
+                 raise RuntimeError("Window could not be created upon HWND access.")
+        return self._hwnd
+
+    def set_title(self, title):
+        """Устанавливает заголовок окна."""
+        if not SetWindowTextW(self.hwnd, LPCWSTR(title)):
+            raise ctypes.WinError(GetLastError(), f"Failed to set window title to '{title}'")
+
+    def get_title(self):
+        """Возвращает заголовок окна."""
+        length = GetWindowTextLengthW(self.hwnd)
+        if length == 0 and GetLastError() != 0:
+            raise ctypes.WinError(GetLastError(), "Failed to get window text length")
+        if length == 0: return ""
+
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        if GetWindowTextW(self.hwnd, buffer, length + 1) == 0 and GetLastError() != 0:
+            raise ctypes.WinError(GetLastError(), "Failed to get window text")
+        return buffer.value
+
+    def get_rect(self) -> RECT:
+        """Возвращает прямоугольник окна в экранных координатах."""
+        rect = RECT()
+        if not GetWindowRect(self.hwnd, ctypes.byref(rect)):
+             raise ctypes.WinError(GetLastError(), "Failed to get window rect")
+        return rect
+
+    def get_position(self) -> tuple[int, int]:
+        """Возвращает позицию левого верхнего угла окна (x, y) в экранных координатах."""
+        rect = self.get_rect()
+        return (rect.left, rect.top)
+
+    def set_position(self, x, y, redraw=True):
+        """Устанавливает позицию левого верхнего угла окна в экранных координатах."""
+        flags = SWP_NOZORDER | SWP_NOSIZE
+        if not redraw: flags |= SWP_NOREDRAW
+        if not SetWindowPos(self.hwnd, HWND(0), x, y, 0, 0, flags):
+            raise ctypes.WinError(GetLastError(), f"Failed to set window position to ({x}, {y})")
+
+    def get_size(self) -> tuple[int, int]:
+        """Возвращает размер всего окна (width, height)."""
+        rect = self.get_rect()
+        return (rect.right - rect.left, rect.bottom - rect.top)
+
+    def set_size(self, width, height, redraw=True):
+        """Устанавливает размер всего окна (width, height)."""
+        flags = SWP_NOZORDER | SWP_NOMOVE
+        if not redraw: flags |= SWP_NOREDRAW
+        if not SetWindowPos(self.hwnd, HWND(0), 0, 0, width, height, flags):
+            raise ctypes.WinError(GetLastError(), f"Failed to set window size to ({width}x{height})")
+
+    def get_client_rect(self) -> RECT:
+        """Возвращает прямоугольник клиентской области окна (относительно левого верхнего угла клиентской области)."""
+        rect = RECT()
+        if not GetClientRect(self.hwnd, ctypes.byref(rect)):
+             raise ctypes.WinError(GetLastError(), "Failed to get client rect")
+        return rect
+
+    def get_client_size(self) -> tuple[int, int]:
+        """Возвращает размер клиентской области окна (width, height)."""
+        rect = self.get_client_rect()
+        return (rect.right - rect.left, rect.bottom - rect.top) # left/top всегда 0 для GetClientRect
+
+    def center_on_screen(self):
+        """Центрирует окно на экране."""
+        screen_w = GetSystemMetrics(SM_CXSCREEN)
+        screen_h = GetSystemMetrics(SM_CYSCREEN)
+        w, h = self.get_size()
+        x = (screen_w - w) // 2
+        y = (screen_h - h) // 2
+        self.set_position(x, y)
+
+    def show(self, show_cmd=SW_SHOW):
+        """Показывает окно с указанным флагом (SW_*)."""
+        ShowWindow(self.hwnd, show_cmd)
+
+    def hide(self):
+        """Скрывает окно."""
+        ShowWindow(self.hwnd, SW_HIDE)
+
+    def minimize(self):
+        """Сворачивает окно."""
+        ShowWindow(self.hwnd, SW_MINIMIZE)
+
+    def maximize(self):
+        """Разворачивает окно."""
+        ShowWindow(self.hwnd, SW_MAXIMIZE)
+
+    def restore(self):
+        """Восстанавливает нормальный размер и положение окна."""
+        ShowWindow(self.hwnd, SW_RESTORE)
+
+    def enable(self):
+        """Делает окно активным (доступным для ввода)."""
+        EnableWindow(self.hwnd, True)
+
+    def disable(self):
+        """Делает окно неактивным."""
+        EnableWindow(self.hwnd, False)
+
+    def is_enabled(self):
+        """Проверяет, активно ли окно."""
+        return IsWindowEnabled(self.hwnd)
+
+    def bring_to_top(self):
+        """Перемещает окно наверх Z-порядка."""
+        BringWindowToTop(self.hwnd)
+
+    def set_foreground(self):
+        """Пытается сделать окно активным и вывести на передний план."""
+        # Может не сработать, если у процесса нет прав
+        try:
+            SetForegroundWindow(self.hwnd)
+        except Exception as e: # SetForegroundWindow может вызывать ошибки доступа
+            print(f"Warning: SetForegroundWindow failed: {e}. Trying BringWindowToTop.", file=sys.stderr)
+            try: self.bring_to_top()
+            except Exception as e2: print(f"Warning: BringWindowToTop also failed: {e2}", file=sys.stderr)
+
+    def make_topmost(self, is_topmost=True):
+        """Делает окно "поверх всех окон" или обычным."""
+        hwnd_insert_after = HWND_TOPMOST if is_topmost else HWND_NOTOPMOST
+        if not SetWindowPos(self.hwnd, hwnd_insert_after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE):
+             raise ctypes.WinError(GetLastError(), f"Failed to set topmost status to {is_topmost}")
+
+    def get_style(self):
+        """Возвращает основные стили окна (WS_*)."""
+        SetLastError(0) # Clear last error
+        style = GetWindowLongPtrW(self.hwnd, GWL_STYLE)
+        if style == 0:
+             err = GetLastError()
+             if err != 0: raise ctypes.WinError(err, "Failed to get window style")
+        return style
+
+    def set_style(self, style, redraw=True):
+        """Устанавливает основные стили окна (WS_*)."""
+        SetLastError(0) # Clear last error
+        old_style = SetWindowLongPtrW(self.hwnd, GWL_STYLE, style)
+        if old_style == 0:
+            err = GetLastError()
+            if err != 0: raise ctypes.WinError(err, "Failed to set window style")
+        # Обновить фрейм окна, если стили изменились
+        if redraw:
+             SetWindowPos(self.hwnd, HWND(0), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER)
+
+    def get_ex_style(self):
+        """Возвращает расширенные стили окна (WS_EX_*)."""
+        SetLastError(0)
+        style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE)
+        if style == 0:
+             err = GetLastError()
+             if err != 0: raise ctypes.WinError(err, "Failed to get window extended style")
+        return style
+
+    def set_ex_style(self, ex_style, redraw=True):
+        """Устанавливает расширенные стили окна (WS_EX_*)."""
+        SetLastError(0)
+        old_style = SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex_style)
+        if old_style == 0:
+            err = GetLastError()
+            if err != 0: raise ctypes.WinError(err, "Failed to set window extended style")
+        if redraw:
+             SetWindowPos(self.hwnd, HWND(0), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER)
+
+    def invalidate(self, rect=None, erase=True):
+        """ Делает недействительной указанную область окна (или всю), вызывая перерисовку (WM_PAINT)."""
+        rect_ptr = ctypes.byref(rect) if rect else None
+        if not InvalidateRect(self.hwnd, rect_ptr, erase):
+            raise ctypes.WinError(GetLastError(), "Failed to invalidate window rect")
 
     def close(self):
-        if self._hwnd: PostMessageW(self._hwnd, WM_CLOSE, 0, 0)
+        """Инициирует закрытие окна (отправляет WM_CLOSE)."""
+        if self._hwnd:
+            PostMessageW(self._hwnd, WM_CLOSE, 0, 0)
 
-    def _clear_hwnd(self): self._hwnd = None
-    @property
-    def hwnd(self): return self._hwnd
+    def destroy(self):
+        """ Принудительно уничтожает окно, обходя WM_CLOSE."""
+        if self._hwnd:
+            DestroyWindow(self.hwnd) # hwnd станет None после WM_NCDESTROY
+
+    def _clear_hwnd(self):
+        """ Внутренний метод для сброса HWND после WM_NCDESTROY."""
+        # print(f"HWND {self._hwnd} is being cleared.")
+        self._hwnd = None
+        # Удаляем кастомную кисть, если она была создана нами
+        if self._is_custom_brush and self._hbrush_background:
+            # print(f"Deleting custom background brush {self._hbrush_background}")
+            if not DeleteObject(self._hbrush_background):
+                 print(f"Warning: Failed to delete custom background brush. Error: {get_last_error_message()}", file=sys.stderr)
+            self._hbrush_background = None
+            self._is_custom_brush = False
+
     def __del__(self):
-        if self._self_addr in _pending_windows:
-           try: del _pending_windows[self._self_addr]
-           except KeyError: pass
-        # TODO: Удаление кастомных GDI объектов, если необходимо
+        """Деструктор объекта Python."""
+        # print(f"Python object {id(self)} finalizing.")
+        # Если окно все еще существует, это может быть утечкой!
+        if self._hwnd:
+             print(f"Warning: BaseWindow object deleted but HWND {self._hwnd} might still exist.", file=sys.stderr)
+             # НЕ пытайтесь вызвать DestroyWindow отсюда, это небезопасно!
+             # Но можно попытаться удалить кастомную кисть, если _clear_hwnd не вызывался
+             if self._is_custom_brush and self._hbrush_background:
+                  print(f"Attempting to delete potentially leaked custom brush in __del__", file=sys.stderr)
+                  if not DeleteObject(self._hbrush_background): pass # Игнорируем ошибку
+                  self._hbrush_background = None; self._is_custom_brush = False
 
+        # Убираем из _pending_windows на всякий случай
+        if self._self_addr in _pending_windows:
+            try: del _pending_windows[self._self_addr]
+            except KeyError: pass
 
 # --- Утилиты ---
-# ... (get_client_rect, draw_text, etc. - без изменений) ...
-def get_client_rect(hwnd) -> RECT:
-    """Получает RECT клиентской области окна."""
-    rect = RECT()
-    if not GetClientRect(hwnd, ctypes.byref(rect)):
-         raise ctypes.WinError(GetLastError())
-    return rect
+def get_screen_size() -> tuple[int, int]:
+    """Возвращает размер экрана (width, height)."""
+    return (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
 
-def draw_text(hdc, text, rect, format_flags=(0x00000001 | 0x00000004 | 0x00000020)): # DT_CENTER | DT_VCENTER | DT_SINGLELINE
-    """Рисует текст с помощью DrawTextW."""
-    if not isinstance(rect, RECT): raise TypeError("rect must be a RECT structure")
-    result = DrawTextW(hdc, str(text), -1, ctypes.byref(rect), format_flags)
-    if result == 0:
-         pass # DrawText часто не устанавливает GetLastError
-    return result
+def get_cursor_pos() -> POINT:
+    """Возвращает текущие координаты курсора на экране."""
+    pt = POINT()
+    if not GetCursorPos(ctypes.byref(pt)):
+        raise ctypes.WinError(GetLastError(), "Failed to get cursor position")
+    return pt
 
-def set_text_color(hdc, color_bgr):
-    """Устанавливает цвет текста GDI (COLORREF BGR)."""
-    return SetTextColor(hdc, color_bgr)
+def screen_to_client(hwnd, point: POINT) -> POINT:
+    """Преобразует экранные координаты в клиентские для указанного окна."""
+    if not ScreenToClient(hwnd, ctypes.byref(point)):
+        raise ctypes.WinError(GetLastError(), "Failed screen to client conversion")
+    return point
 
-def set_bk_mode(hdc, mode):
-    """Устанавливает режим фона GDI (1=TRANSPARENT, 2=OPAQUE)."""
-    return SetBkMode(hdc, mode)
+def client_to_screen(hwnd, point: POINT) -> POINT:
+    """Преобразует клиентские координаты окна в экранные."""
+    if not ClientToScreen(hwnd, ctypes.byref(point)):
+        raise ctypes.WinError(GetLastError(), "Failed client to screen conversion")
+    return point
 
+# Вспомогательные макросы для разбора WPARAM/LPARAM из специфичных сообщений
+def GET_WHEEL_DELTA_WPARAM(wParam): return ctypes.c_short(HIWORD(wParam)).value # Delta for WM_MOUSEWHEEL
+def GET_KEYSTATE_WPARAM(wParam): return LOWORD(wParam) # MK_* flags for WM_MOUSEWHEEL
