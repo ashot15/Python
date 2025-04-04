@@ -1,0 +1,501 @@
+Файл: cool_triangle_lib.py (Версия 0.3.0)
+# cool_triangle_lib.py
+"""
+Cool Triangle Library - Ваша личная, улучшенная библиотека для создания
+динамичных и интерактивных треугольников в Pygame.
+
+Версия: 0.3.0
+
+Ключевые изменения:
+- Исправлена ошибка 'unhashable type'.
+- Оптимизирована логика трансформаций (ленивые вычисления).
+- Улучшено использование сглаживания (gfxdraw).
+- Добавлен метод clone().
+- Улучшена валидация и структура.
+
+(Разделы о подготовке к публикации опущены для краткости, см. предыдущий ответ)
+"""
+
+__version__ = "0.3.0"
+
+import pygame as pg
+import math
+import sys
+import time
+import copy # Для метода clone
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional, Sequence
+
+# --- Типы данных ---
+Vertex = Tuple[float, float]
+Color = Tuple[int, int, int, int] # RGBA (0-255)
+
+# --- Утилиты ---
+class TriangleError(ValueError): # Наследуемся от ValueError для большей конкретики
+    """ Базовый класс исключений для этой библиотеки. """
+    pass
+
+def _validate_color(color_tuple: Optional[Color], param_name: str) -> Optional[Color]:
+    if color_tuple is None: return None
+    if not isinstance(color_tuple, (list, tuple)) or len(color_tuple) != 4:
+        raise TriangleError(f"'{param_name}': Invalid color format. Expected 4-element RGBA tuple/list (0-255), got {color_tuple}.")
+    if not all(isinstance(c, int) and 0 <= c <= 255 for c in color_tuple):
+        raise TriangleError(f"'{param_name}': Color components must be integers between 0 and 255. Got {color_tuple}.")
+    return tuple(color_tuple) # Всегда возвращаем кортеж
+
+def _validate_vertices(vertices: List[Vertex]) -> List[Vertex]:
+    if not isinstance(vertices, list) or len(vertices) != 3:
+        raise TriangleError("Triangle needs a list of exactly 3 vertices.")
+    validated = []
+    for i, v in enumerate(vertices):
+        if not isinstance(v, (tuple, list)) or len(v) != 2:
+           raise TriangleError(f"Vertex {i} ({v}) is not a valid 2-element tuple/list (x, y).")
+        if not all(isinstance(coord, (int, float)) for coord in v):
+           raise TriangleError(f"Coordinates in vertex {i} ({v}) must be numbers (int/float).")
+        validated.append((float(v[0]), float(v[1]))) # Конвертируем в float
+    return validated
+
+# --- Функции трансформаций (без изменений) ---
+def _rotate_point(cx: float, cy: float, angle_deg: float, px: float, py: float) -> Vertex:
+    angle_rad = math.radians(angle_deg); cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+    return (cos_a * (px - cx) - sin_a * (py - cy) + cx, sin_a * (px - cx) + cos_a * (py - cy) + cy)
+def _scale_point(cx: float, cy: float, scale: float, px: float, py: float) -> Vertex:
+    scale = max(0.0, scale); return (cx + (px - cx) * scale, cy + (py - cy) * scale)
+def _is_point_in_triangle_barycentric(px: float, py: float, v1: Vertex, v2: Vertex, v3: Vertex) -> bool:
+    x1, y1 = v1; x2, y2 = v2; x3, y3 = v3
+    denominator = ((y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3))
+    if abs(denominator) < 1e-9: return False # Вырожденный
+    a = ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3)) / denominator
+    b = ((y3 - y1) * (px - x3) + (x1 - x3) * (py - y3)) / denominator
+    c = 1.0 - a - b
+    # >= 0 для включения границы
+    return 0 <= a <= 1 and 0 <= b <= 1 and 0 <= c <= 1
+
+
+# --- Улучшенный Класс Треугольника ---
+
+@dataclass
+class Triangle:
+    """
+    Представляет один динамичный треугольник с трансформациями и проверкой попадания.
+
+    Оптимизации: Ленивый пересчет трансформаций, хранение оригинальных атрибутов.
+    """
+    # Основные параметры (можно задать при создании)
+    vertices_orig: List[Vertex] = field(default_factory=lambda: [(0, -25), (-25, 25), (25, 25)]) # Default маленький треугольник
+    fill_color: Optional[Color] = (150, 150, 220, 255)
+    border_color: Color = (30, 30, 30, 255)
+    border_thickness: int = 1
+    position: Vertex = (0.0, 0.0)
+    rotation_deg: float = 0.0
+    scale: float = 1.0
+    alpha_multiplier: float = 1.0
+
+    # Приватные / служебные поля
+    _original_border_color: Optional[Color] = field(init=False, repr=False, default=None) # <-- Исправление Ошибки
+    _original_border_thickness: int = field(init=False, repr=False, default=1)      # <-- Исправление Ошибки
+    _center: Vertex = field(init=False, repr=False, default=(0.0, 0.0))
+    _transformed_vertices: List[Vertex] = field(init=False, repr=False, default_factory=list)
+    _needs_recalc: bool = field(init=False, repr=False, default=True)
+    _bounding_box: Optional[Tuple[float, float, float, float]] = field(init=False, repr=False, default=None)
+
+    def __post_init__(self):
+        """ Валидация и инициализация служебных полей. """
+        try:
+            self.vertices_orig = _validate_vertices(self.vertices_orig)
+            self.border_thickness = int(self.border_thickness)
+            if self.border_thickness < 0: raise TriangleError("border_thickness cannot be negative.")
+            self.fill_color = _validate_color(self.fill_color, "fill_color")
+            self.border_color = _validate_color(self.border_color, "border_color") or (0,0,0,255)
+
+            # Сохраняем оригинальные значения для восстановления / сравнения
+            self._original_border_color = self.border_color
+            self._original_border_thickness = self.border_thickness
+
+            # Валидация и клэмп трансформаций
+            self.position = (float(self.position[0]), float(self.position[1]))
+            self.rotation_deg = float(self.rotation_deg)
+            self.scale = max(0.0, float(self.scale))
+            self.alpha_multiplier = max(0.0, min(1.0, float(self.alpha_multiplier)))
+
+        except (TypeError, ValueError, IndexError) as e:
+            raise TriangleError(f"Initialization failed: {e}") from e
+
+        self._recalculate_center()
+        self._invalidate() # Пометить для пересчета при первом доступе
+
+    def clone(self) -> 'Triangle':
+         """ Создает глубокую копию этого треугольника. """
+         # DataClass с полями-списками требует deepcopy
+         return copy.deepcopy(self)
+
+    def _recalculate_center(self) -> None:
+        """ Пересчитывает центр оригинальных вершин. """
+        if not self.vertices_orig: self._center = (0.0, 0.0); return
+        self._center = (sum(v[0] for v in self.vertices_orig) / 3.0,
+                        sum(v[1] for v in self.vertices_orig) / 3.0)
+
+    @property
+    def center(self) -> Vertex: return self._center
+
+    def _apply_transforms(self) -> None:
+        """ Применяет трансформации и обновляет _transformed_vertices и _bounding_box. """
+        cx, cy = self.center
+        tx, ty = self.position
+        final_vertices = []
+        if not self.vertices_orig:
+             self._transformed_vertices = []
+             self._bounding_box = None
+             return
+
+        min_x, min_y = float('inf'), float('inf')
+        max_x, max_y = float('-inf'), float('-inf')
+
+        current_scale = self.scale # Уже валидировано в сеттере
+        current_rotation = self.rotation_deg # Уже валидировано
+
+        for px, py in self.vertices_orig:
+            scaled_x, scaled_y = _scale_point(cx, cy, current_scale, px, py)
+            rotated_x, rotated_y = _rotate_point(cx, cy, current_rotation, scaled_x, scaled_y)
+            final_x, final_y = rotated_x + tx, rotated_y + ty
+            final_vertices.append((final_x, final_y))
+
+            # Обновляем bounding box по ходу дела
+            min_x, min_y = min(min_x, final_x), min(min_y, final_y)
+            max_x, max_y = max(max_x, final_x), max(max_y, final_y)
+
+        self._transformed_vertices = final_vertices
+        self._bounding_box = (min_x, min_y, max_x, max_y)
+        self._needs_recalc = False # Сброс флага
+
+    @property
+    def vertices(self) -> List[Vertex]:
+        """ Возвращает актуальные координаты вершин (ленивый пересчет). """
+        if self._needs_recalc: self._apply_transforms()
+        return self._transformed_vertices
+
+    @property
+    def current_fill_color(self) -> Optional[Color]:
+        if self.fill_color is None: return None
+        r, g, b, a_orig = self.fill_color
+        a_new = int(a_orig * self.alpha_multiplier)
+        return (r, g, b, max(0, min(255, a_new))) # Clamp alpha 0-255
+
+    @property
+    def current_border_color(self) -> Color:
+        r, g, b, a_orig = self.border_color
+        a_new = int(a_orig * self.alpha_multiplier)
+        return (r, g, b, max(0, min(255, a_new))) # Clamp alpha 0-255
+
+    def _invalidate(self):
+        """ Помечает, что трансформации и BBox нужно пересчитать при след. доступе. """
+        self._needs_recalc = True
+        self._bounding_box = None # Сбрасываем кэш BBox
+
+    # --- Сеттеры с валидацией и инвалидацией ---
+    def set_position(self, x: float, y: float) -> 'Triangle':
+        self.position = (float(x), float(y)); self._invalidate(); return self
+    def move(self, dx: float, dy: float) -> 'Triangle':
+        return self.set_position(self.position[0] + dx, self.position[1] + dy)
+
+    def set_rotation(self, angle_deg: float) -> 'Triangle':
+        self.rotation_deg = float(angle_deg); self._invalidate(); return self
+    def rotate(self, angle_deg: float) -> 'Triangle':
+        return self.set_rotation(self.rotation_deg + angle_deg)
+
+    def set_scale(self, scale: float) -> 'Triangle':
+        new_scale = max(0.0, float(scale))
+        if abs(self.scale - new_scale) > 1e-9: # Invalidate only if changed significantly
+            self.scale = new_scale
+            self._invalidate()
+        return self
+    def rescale(self, factor: float) -> 'Triangle':
+        return self.set_scale(self.scale * float(factor))
+
+    def set_alpha_multiplier(self, alpha: float) -> 'Triangle':
+        self.alpha_multiplier = max(0.0, min(1.0, float(alpha)))
+        # Не требует _invalidate(), так как не меняет геометрию
+        return self
+
+    def set_fill_color(self, color: Optional[Color]) -> 'Triangle':
+         self.fill_color = _validate_color(color, "fill_color"); return self
+    def set_border_color(self, color: Color) -> 'Triangle':
+         self.border_color = _validate_color(color, "border_color") or (0,0,0,255); return self
+    def set_border_thickness(self, thickness: int) -> 'Triangle':
+        if not isinstance(thickness, int) or thickness < 0: raise TriangleError("border_thickness must be >= 0.")
+        self.border_thickness = thickness; return self
+
+
+    # --- Другие методы ---
+    def get_bounding_box(self) -> Optional[Tuple[float, float, float, float]]:
+        """ Возвращает (min_x, min_y, max_x, max_y) для *актуальных* вершин (кэшированный). """
+        if self._needs_recalc: self._apply_transforms() # Убедиться что BBox посчитан
+        return self._bounding_box
+
+    def is_point_inside(self, point: Vertex) -> bool:
+        """ Проверяет попадание точки внутрь или на границу актуальных вершин. """
+        if self._needs_recalc: self._apply_transforms() # Нужны актуальные вершины
+        if not self._transformed_vertices: return False
+        if not isinstance(point, (tuple, list)) or len(point) != 2: return False
+
+        # Быстрая проверка по Bounding Box для оптимизации
+        bbox = self.get_bounding_box()
+        if bbox and not (bbox[0] <= point[0] <= bbox[2] and bbox[1] <= point[1] <= bbox[3]):
+            return False
+
+        # Точная проверка
+        return _is_point_in_triangle_barycentric(
+            float(point[0]), float(point[1]), *self._transformed_vertices # type: ignore
+        )
+
+
+# --- Оптимизированный Класс Рендерера ---
+
+class TriangleRenderer:
+    """
+    Отвечает за отрисовку Triangle объектов на поверхности Pygame.
+    Использует gfxdraw для сглаживания при доступности.
+    """
+    _gfxdraw_available = False
+    _gfxdraw_checked = False
+
+    def __init__(self):
+        if not TriangleRenderer._gfxdraw_checked:
+            TriangleRenderer._gfxdraw_checked = True
+            try:
+                import pygame.gfxdraw as gfx # Импортируем как gfx для краткости
+                # Проверка на основные функции
+                if hasattr(gfx, 'aapolygon') and hasattr(gfx, 'filled_polygon'):
+                    TriangleRenderer._gfxdraw_available = True
+                    print("[TriangleRenderer] Anti-aliasing ENABLED via pygame.gfxdraw.")
+            except ImportError:
+                print("[TriangleRenderer] Anti-aliasing DISABLED (pygame.gfxdraw not found).")
+            except Exception as e:
+                 print(f"[TriangleRenderer] Warning: gfxdraw check error: {e}. AA disabled.")
+
+
+    def _draw_single_triangle(self, surface: pg.Surface, triangle: Triangle):
+        """ Отрисовка одного треугольника с AA. """
+        current_vertices = triangle.vertices # Получаем актуальные вершины
+        if not current_vertices or len(current_vertices) != 3: return # Пропуск если нет вершин
+
+        # Преобразование в int перед рисованием
+        int_vertices: List[Tuple[int, int]] = [(int(v[0]), int(v[1])) for v in current_vertices]
+
+        # Актуальные цвета с учетом alpha_multiplier
+        fill_color = triangle.current_fill_color
+        border_color = triangle.current_border_color
+        thickness = triangle.border_thickness
+
+        # Оптимизация: Если фигура полностью прозрачна, не рисовать
+        fill_visible = fill_color and fill_color[3] > 0
+        border_visible = thickness > 0 and border_color and border_color[3] > 0
+        if not fill_visible and not border_visible:
+            return
+
+        try:
+            # --- ЗАЛИВКА ---
+            if fill_visible:
+                if self._gfxdraw_available:
+                     # gfxdraw.filled_polygon сам обрабатывает непрозрачный цвет, рисуя AA края.
+                     # Прямая поддержка alpha в gfxdraw.filled_polygon ограничена.
+                     # Для настоящей прозрачной заливки с AA краями лучше рисовать на временной Surface.
+                     # Сейчас просто рисуем сплошным цветом с AA если не полностью прозрачно.
+                    import pygame.gfxdraw as gfx
+                    gfx.filled_polygon(surface, int_vertices, fill_color) # type: ignore
+                else:
+                    pg.draw.polygon(surface, fill_color, int_vertices, 0) # type: ignore
+
+            # --- ГРАНИЦА ---
+            if border_visible:
+                 # Условие `border_color` проверено в border_visible
+                 border_color = border_color # type: ignore
+                 if self._gfxdraw_available:
+                     # Используем aapolygon для ЛЮБОЙ толщины, т.к. он дает лучший результат
+                     # чем aa=True у pg.draw.lines (которого нет)
+                     import pygame.gfxdraw as gfx
+                     gfx.aapolygon(surface, int_vertices, border_color)
+                     # Если нужна толщина > 1, можно нарисовать еще полигоны со смещением? Сложно.
+                     # Проще использовать pg.draw.lines для толстых линий.
+                     if thickness > 1:
+                          # Рисуем стандартную линию ПОВЕРХ AA линии для толщины
+                          pg.draw.lines(surface, border_color, True, int_vertices, width=thickness)
+                 else: # Стандартный рендеринг без AA
+                     pg.draw.lines(surface, border_color, True, int_vertices, width=thickness)
+
+        except Exception as e:
+             print(f"Pygame render error for T {triangle.vertices_orig}: {e}")
+
+
+    def draw_triangles(self, surface: pg.Surface, triangles: Sequence[Triangle]):
+        """ Рисует последовательность Triangle объектов. """
+        if not isinstance(surface, pg.Surface): raise TriangleError("Need a valid Pygame surface.")
+        if not isinstance(triangles, (list, tuple)): raise TriangleError("'triangles' must be a list or tuple.")
+
+        visible_triangles = 0
+        for triangle in triangles:
+            if isinstance(triangle, Triangle):
+                 # TODO: Оптимизация - Culling (отсечение)
+                 # Если Bounding Box треугольника вне экрана, не рисовать его.
+                 # bbox = triangle.get_bounding_box()
+                 # screen_rect = surface.get_rect()
+                 # if bbox and screen_rect.colliderect(pg.Rect(*bbox)): # Проверка пересечения
+                 self._draw_single_triangle(surface, triangle)
+                 visible_triangles += 1
+            else:
+                 print(f"Warning: Skipping non-Triangle in draw list: {type(triangle)}")
+        # print(f"Rendered {visible_triangles} triangles.") # Debug
+
+
+# --- Фабричные Функции (без изменений, но с **kwargs) ---
+def create_equilateral(cx: float, cy: float, side: float, **kwargs) -> Triangle:
+    height=(math.sqrt(3)/2.0)*side; r_out=(2.0/3.0)*height; r_in=(1.0/3.0)*height
+    v1=(cx,cy-r_out); v2=(cx-side/2.0,cy+r_in); v3=(cx+side/2.0,cy+r_in)
+    return Triangle(vertices_orig=[v1, v2, v3], **kwargs)
+def create_isosceles(cx: float, cy: float, base: float, height: float, pointing_up: bool=True, **kwargs) -> Triangle:
+    half_base=base/2.0; y_base=cy+height/2.0 if pointing_up else cy-height/2.0; y_peak=cy-height/2.0 if pointing_up else cy+height/2.0
+    v1=(cx-half_base,y_base); v2=(cx+half_base,y_base); v3=(cx,y_peak)
+    return Triangle(vertices_orig=[v1, v2, v3], **kwargs)
+def create_right_angle(x: float, y: float, width: float, height: float, corner:str='bottom_left', **kwargs) -> Triangle:
+    w, h = float(width), float(height)
+    if corner=='bottom_left':   v1,v2,v3=(x,y),(x+w,y),(x,y-h) # Угол вверху, основание внизу -> Y идет ВВЕРХ
+    elif corner=='bottom_right':  v1,v2,v3=(x,y),(x-w,y),(x,y-h)
+    elif corner=='top_left':      v1,v2,v3=(x,y),(x+w,y),(x,y+h) # Угол внизу, основание вверху
+    elif corner=='top_right':     v1,v2,v3=(x,y),(x-w,y),(x,y+h)
+    else: raise ValueError("Invalid corner for right angle triangle.")
+    return Triangle(vertices_orig=[v1, v2, v3], **kwargs)
+
+
+# --- Демонстрация улучшенной библиотеки ---
+if __name__ == "__main__":
+    print(f"Cool Triangle Library v{__version__} Demo")
+    try:
+        pg.init()
+        pg.font.init() # Для возможного текста в будущем
+    except Exception as e:
+        print(f"FATAL: Pygame init failed: {e}"); sys.exit(1)
+
+    SCREEN_WIDTH, SCREEN_HEIGHT = 1000, 700
+    try:
+        screen = pg.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pg.RESIZABLE | pg.SRCALPHA)
+    except Exception as e:
+        print(f"FATAL: Could not set video mode: {e}"); pg.quit(); sys.exit(1)
+
+    pg.display.set_caption(f"Cool Triangle Library v{__version__} Demo - Hover & Animate!")
+    clock = pg.time.Clock()
+    BG_COLOR = (250, 252, 255, 255) # Почти белый
+
+    renderer = TriangleRenderer()
+    my_triangles: List[Triangle] = []
+
+    # Создаем объекты
+    try:
+        tri1 = create_equilateral(200, 220, 150, fill_color=(230, 60, 60, 200), border_thickness=2)
+        tri1.set_position(50, 0) # Немного сдвинем
+        my_triangles.append(tri1)
+
+        tri2 = create_isosceles(500, 250, 220, 130, fill_color=(60, 210, 60, 255), border_color=(10, 60, 10, 255), border_thickness=5)
+        my_triangles.append(tri2)
+
+        tri3 = create_right_angle(800, 400, 180, 220, corner='top_right', fill_color=(60, 90, 230, 160), border_color=(10, 10, 80, 255), border_thickness=3)
+        my_triangles.append(tri3)
+
+        tri4 = Triangle( # Создаем копию первого и меняем
+                vertices_orig=tri1.vertices_orig, # Берем ту же форму
+                fill_color=(230, 150, 40, 255), border_thickness=1
+                ).set_position(150, 450).set_scale(0.8)
+        my_triangles.append(tri4)
+
+    except TriangleError as e:
+         print(f"Error creating triangles: {e}"); pg.quit(); sys.exit(1)
+
+    # Запоминаем оригинальные стили (Больше не нужен словарь!)
+    for tri in my_triangles:
+        # Мы уже сохранили их в __post_init__, можем использовать их напрямую
+        pass
+
+    # Переменные для анимации и интерактивности
+    anim_time = 0.0
+    hovered_triangle: Optional[Triangle] = None
+    HOVER_BORDER_COLOR: Color = (255, 140, 0, 255) # Яркий оранжевый
+    HOVER_THICKNESS_INCREASE = 4 # На сколько увеличивать толщину при наведении
+
+    # Основной цикл
+    running = True
+    while running:
+        dt = clock.tick(60) / 1000.0
+        anim_time += dt
+        mouse_pos = pg.mouse.get_pos()
+
+        # --- Обработка событий ---
+        for event in pg.event.get():
+            if event.type == pg.QUIT: running = False
+            if event.type == pg.VIDEORESIZE:
+                try:
+                    screen = pg.display.set_mode(event.size, pg.RESIZABLE | pg.SRCALPHA)
+                    SCREEN_WIDTH, SCREEN_HEIGHT = event.size
+                except Exception as e:
+                    print(f"Error on resize: {e}"); running=False # Выход при ошибке
+            if event.type == pg.KEYDOWN:
+                if event.key == pg.K_ESCAPE: running = False
+                if event.key == pg.K_SPACE: # Клонируем последний добавленный треугольник
+                     try:
+                        cloned = my_triangles[-1].clone()
+                        cloned.move(dx=20 * (len(my_triangles) % 5), dy=-20 * (len(my_triangles) % 3)) # Смещаем копию
+                        my_triangles.append(cloned)
+                        print(f"Cloned triangle. Total: {len(my_triangles)}")
+                     except IndexError:
+                          print("No triangles to clone.")
+                     except Exception as e:
+                          print(f"Error cloning: {e}")
+
+        # --- Обновление состояния треугольников ---
+        # Анимация (примеры)
+        tri1.rotate(50 * dt)
+        tri1.set_alpha_multiplier(0.5 + (math.sin(anim_time * 2.5) + 1) * 0.25) # Пульсация 0.5-1.0
+
+        tri2.set_scale(1.0 + math.sin(anim_time * 1.8) * 0.2)
+
+        tri3.set_position(x=800 + math.cos(anim_time) * 30, y=400 + math.sin(anim_time) * 20)
+
+        # Проверка наведения мыши (сверху вниз по порядку отрисовки)
+        current_hover = None
+        for tri in reversed(my_triangles):
+            if tri.is_point_inside(mouse_pos):
+                 current_hover = tri
+                 break
+
+        # Применяем и сбрасываем эффект наведения
+        # (Плавное изменение цвета требует больше логики state management / tweening)
+        for tri in my_triangles:
+            is_hovered = (tri is current_hover)
+            # Меняем цвет границы
+            tri.set_border_color(HOVER_BORDER_COLOR if is_hovered else tri._original_border_color)
+             # Меняем толщину границы
+            tri.set_border_thickness(tri._original_border_thickness + HOVER_THICKNESS_INCREASE if is_hovered else tri._original_border_thickness)
+
+        # --- Отрисовка ---
+        screen.fill(BG_COLOR)
+        renderer.draw_triangles(screen, my_triangles) # <-- Магия здесь
+        pg.display.flip()
+
+    # --- Выход ---
+    print(f"Exiting Demo ({len(my_triangles)} triangles).")
+    pg.quit()
+    sys.exit()
+Use code with caution.
+Python
+Резюме Улучшений:
+Исправлена Ошибка: Использование объектов как ключей словаря заменено хранением исходных стилей в атрибутах самого объекта Triangle (_original_border_color, _original_border_thickness).
+Ленивые Вычисления: Трансформации координат вершин и bounding box вычисляются только тогда, когда они действительно нужны (при запросе .vertices или .get_bounding_box(), если установлен флаг _needs_recalc). Флаг устанавливается сеттерами трансформаций (set_position, set_rotation, set_scale и т.д.).
+Оптимизация Рендеринга:
+Не рисуем невидимые элементы (если alpha у цвета = 0 или толщина = 0).
+Проверка gfxdraw делается один раз на класс, а не на экземпляр.
+Более аккуратное применение aapolygon и lines для границ разной толщины.
+API и Удобство:
+Добавлен метод Triangle.clone() для легкого создания копий.
+Сеттеры (set_fill_color, set_border_color и т.д.) теперь тоже fluent (возвращают self).
+Улучшенная валидация всех входных данных с использованием TriangleError.
+Надежность: Более стабильная работа с Pygame, ловим ошибки отрисовки отдельного треугольника.
+Этот код значительно ближе к концепции полезной, небольшой графической библиотеки, фокусирующейся на треугольниках, с улучшениями производительности (в пределах Pygame/Python) и более надежным и гибким API.
+89.1s
