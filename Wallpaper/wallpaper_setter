@@ -1,0 +1,305 @@
+# wallpaper_setter.py
+import platform
+import subprocess
+import ctypes
+import os
+import shutil # For shutil.which to find executables
+import logging # Using logging instead of just print for better control
+
+# Configure basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def _run_command(command: list[str]) -> tuple[bool, str, str]:
+    """Helper function to run a command and capture output."""
+    try:
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False, # Don't raise exception on non-zero exit
+            encoding='utf-8' # Be explicit about encoding
+        )
+        if process.returncode == 0:
+            logging.info(f"Command succeeded: {' '.join(command)}")
+            return True, process.stdout.strip(), process.stderr.strip()
+        else:
+            logging.warning(
+                f"Command failed with code {process.returncode}: {' '.join(command)}\n"
+                f"Stderr: {process.stderr.strip()}\n"
+                f"Stdout: {process.stdout.strip()}"
+            )
+            return False, process.stdout.strip(), process.stderr.strip()
+    except FileNotFoundError:
+        logging.error(f"Command not found: {command[0]}")
+        return False, "", f"Command not found: {command[0]}"
+    except Exception as e:
+        logging.error(f"Error running command {' '.join(command)}: {e}", exc_info=True)
+        return False, "", str(e)
+
+def _set_wallpaper_windows(image_path: str) -> bool:
+    """Sets wallpaper on Windows."""
+    try:
+        # SPI_SETDESKWALLPAPER = 20
+        # SPIF_UPDATEINIFILE = 1
+        # SPIF_SENDCHANGE = 2 (or SPIF_SENDWININICHANGE)
+        SPI_SETDESKWALLPAPER = 20
+        SPIF_UPDATEINIFILE = 1
+        SPIF_SENDCHANGE = 2
+        flags = SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
+
+        result = ctypes.windll.user32.SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, image_path, flags)
+        if result:
+            logging.info("Wallpaper set successfully (Windows API).")
+            return True
+        else:
+            # Get and log the specific Windows error
+            error_code = ctypes.GetLastError()
+            error_message = ctypes.FormatError(error_code)
+            logging.error(f"Failed to set wallpaper (Windows API). Error code: {error_code} - {error_message}")
+            return False
+    except Exception as e:
+        logging.error(f"Unexpected error setting wallpaper on Windows: {e}", exc_info=True)
+        return False
+
+def _set_wallpaper_macos(image_path: str) -> bool:
+    """Sets wallpaper on macOS."""
+    try:
+        # Use more robust AppleScript quoting for paths with special characters
+        script = f'tell application "System Events" to tell every desktop to set picture to POSIX file "{image_path}"'
+        if not shutil.which("osascript"):
+             logging.error("osascript command not found. Cannot set wallpaper on macOS.")
+             return False
+
+        success, _, stderr = _run_command(['osascript', '-e', script])
+        if success:
+            logging.info("Wallpaper set successfully (macOS AppleScript).")
+            return True
+        else:
+            logging.error(f"Failed to set wallpaper (macOS AppleScript). Error: {stderr}")
+            return False
+    except Exception as e:
+        logging.error(f"Unexpected error setting wallpaper on macOS: {e}", exc_info=True)
+        return False
+
+def _set_wallpaper_linux(image_path: str) -> bool:
+    """Sets wallpaper on Linux, trying various DE methods."""
+    # Method 1: gsettings (GNOME, Cinnamon, MATE, Budgie, etc.)
+    if shutil.which("gsettings"):
+        logging.info("Attempting to set wallpaper using gsettings...")
+        # Check for dark mode support and set both if possible
+        schema = 'org.gnome.desktop.background'
+        key = 'picture-uri'
+        key_dark = 'picture-uri-dark'
+        uri = f'file://{image_path}'
+
+        # Check if keys exist before trying to set them
+        has_key, _, _ = _run_command(['gsettings', 'list-keys', schema])
+        keys_available = _.splitlines() if has_key else []
+
+        success_light = False
+        if key in keys_available:
+             success_light, _, _ = _run_command(['gsettings', 'set', schema, key, uri])
+        else:
+             logging.info(f"gsettings key '{key}' not found in schema '{schema}'. Skipping.")
+             # If the main key doesn't exist, gsettings is unlikely to work for this DE
+             # We could potentially stop trying gsettings here, but let's try dark just in case.
+
+        success_dark = False
+        if key_dark in keys_available:
+             success_dark, _, _ = _run_command(['gsettings', 'set', schema, key_dark, uri])
+        else:
+             logging.info(f"gsettings key '{key_dark}' not found in schema '{schema}'. Skipping.")
+
+        if success_light or success_dark: # Succeed if at least one worked
+            logging.info("Wallpaper likely set successfully using gsettings.")
+            return True
+        else:
+            logging.warning("gsettings method failed or keys not found.")
+    else:
+        logging.info("gsettings command not found. Skipping gsettings method.")
+
+    # Method 2: xfconf-query (XFCE)
+    if shutil.which("xfconf-query"):
+        logging.info("Attempting to set wallpaper using xfconf-query (XFCE)...")
+        # Find the correct property for the background image
+        # This often involves iterating through properties under xfce4-desktop/desktop-icons
+        # A common property is '/backdrop/screen0/monitor*/image-path' or similar
+        # Let's try a common one first. This might need adjustment based on XFCE version/config.
+        # We might need to query the list of monitors first.
+        # Simpler approach: Set the 'last-image' property which usually works.
+        channel = "xfce4-desktop"
+        prop_base = "/backdrop/screen0/monitor" # Need to figure out monitor identifier
+
+        # Let's try setting the 'last-image' for all monitors detected
+        success_any_monitor = False
+        try:
+             # Get list of properties related to backdrops
+             list_cmd = ['xfconf-query', '-c', channel, '-l', '-v']
+             list_success, list_stdout, _ = _run_command(list_cmd)
+             if list_success:
+                  properties = [line.split()[0] for line in list_stdout.splitlines() if 'last-image' in line]
+                  if not properties:
+                       logging.warning("Could not find 'last-image' properties via xfconf-query. Trying a default.")
+                       # Fallback to a common default if listing failed or yielded nothing
+                       properties = [f"{prop_base}0/workspace0/last-image", f"{prop_base}1/workspace0/last-image"] # Guess common names
+
+                  for prop in properties:
+                       set_cmd = ['xfconf-query', '-c', channel, '-p', prop, '-s', image_path]
+                       success, _, _ = _run_command(set_cmd)
+                       if success:
+                            success_any_monitor = True # Mark success if any monitor worked
+             else:
+                  logging.warning("Failed to list properties with xfconf-query.")
+
+        except Exception as e:
+             logging.error(f"Error processing xfconf-query properties: {e}")
+
+        if success_any_monitor:
+            logging.info("Wallpaper likely set successfully using xfconf-query.")
+            return True
+        else:
+            logging.warning("xfconf-query method failed or suitable properties not found.")
+    else:
+        logging.info("xfconf-query command not found. Skipping XFCE method.")
+
+    # Method 3: plasma-apply-wallpaperimage (KDE Plasma 5.20+) - Preferred KDE method if available
+    if shutil.which("plasma-apply-wallpaperimage"):
+        logging.info("Attempting to set wallpaper using plasma-apply-wallpaperimage (KDE)...")
+        success, _, stderr = _run_command(['plasma-apply-wallpaperimage', image_path])
+        if success:
+            logging.info("Wallpaper set successfully using plasma-apply-wallpaperimage.")
+            return True
+        else:
+            logging.warning(f"plasma-apply-wallpaperimage method failed. Error: {stderr}")
+    else:
+        logging.info("plasma-apply-wallpaperimage command not found. Skipping this KDE method.")
+
+    # Method 4: kwriteconfig5 / kwriteconfig (Older KDE / Fallback) - Less reliable, modifies config files directly
+    # This is generally discouraged as it might require restarting plasmashell. Skipping for now unless necessary.
+    # Example (might need adjustment):
+    # kwriteconfig5 --file ~/.config/plasma-org.kde.plasma.desktop-appletsrc --group Containments --group [ID] --group Wallpaper --group org.kde.image --key Image "file:///path/to/image.png"
+    # Finding the [ID] and restarting plasma is complex.
+
+    # Method 5: pcmanfm-qt (LXQt)
+    if shutil.which("pcmanfm-qt"):
+        logging.info("Attempting to set wallpaper using pcmanfm-qt (LXQt)...")
+        success, _, stderr = _run_command(['pcmanfm-qt', '--set-wallpaper', image_path, '--wallpaper-mode=stretch']) # Or 'fit', 'center', etc.
+        if success:
+            logging.info("Wallpaper set successfully using pcmanfm-qt.")
+            return True
+        else:
+            logging.warning(f"pcmanfm-qt method failed. Error: {stderr}")
+    else:
+        logging.info("pcmanfm-qt command not found. Skipping LXQt method.")
+
+
+    # Method 6: feh (Generic fallback)
+    if shutil.which("feh"):
+        logging.info("Attempting to set wallpaper using feh (fallback)...")
+        # Common options: --bg-fill, --bg-scale, --bg-center, --bg-tile
+        success, _, stderr = _run_command(['feh', '--bg-fill', image_path])
+        if success:
+            # feh usually works by creating a ~/.fehbg script and running it.
+            # The command itself might return success even if the DE doesn't auto-refresh.
+            logging.info("Wallpaper likely set using feh (may require session restart or DE refresh).")
+            return True
+        else:
+            logging.warning(f"feh method failed. Error: {stderr}")
+    else:
+        logging.info("feh command not found. Skipping feh fallback method.")
+
+    # If none of the methods worked
+    logging.error("All attempted methods to set wallpaper on Linux failed.")
+    return False
+
+
+def set_wallpaper(image_path: str) -> bool:
+    """
+    Sets the desktop wallpaper for the current operating system.
+    Tries multiple methods for Linux based on Desktop Environment.
+
+    Args:
+        image_path: The absolute path to the image file.
+
+    Returns:
+        True if setting the wallpaper was likely successful, False otherwise.
+    """
+    logging.info(f"Request received to set wallpaper to: {image_path}")
+
+    # --- Input Validation ---
+    if not isinstance(image_path, str) or not image_path:
+        logging.error("Invalid image path provided (empty or not a string).")
+        return False
+
+    # Convert to absolute path *before* checking existence
+    abs_image_path = os.path.abspath(image_path)
+    logging.info(f"Absolute image path: {abs_image_path}")
+
+    if not os.path.exists(abs_image_path):
+        logging.error(f"Image file not found at the specified path: {abs_image_path}")
+        return False
+    if not os.path.isfile(abs_image_path):
+         logging.error(f"The specified path is not a file: {abs_image_path}")
+         return False
+    # --- End Validation ---
+
+    system = platform.system()
+    success = False
+
+    try:
+        if system == "Windows":
+            success = _set_wallpaper_windows(abs_image_path)
+        elif system == "Darwin": # macOS
+            success = _set_wallpaper_macos(abs_image_path)
+        elif system == "Linux":
+            success = _set_wallpaper_linux(abs_image_path)
+        else:
+            logging.error(f"Unsupported operating system: {system}")
+
+    except Exception as e:
+        # Catch any unexpected errors during OS-specific calls
+        logging.error(f"An unexpected error occurred in set_wallpaper for {system}: {e}", exc_info=True)
+        success = False
+
+    if success:
+        logging.info("Wallpaper setting process completed successfully.")
+    else:
+        logging.error("Wallpaper setting process failed for the current OS.")
+
+    return success
+
+# Example usage (optional, for testing this file directly)
+if __name__ == '__main__':
+    # Create a dummy file for testing in the script's directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    test_img_filename = "test_wallpaper_dummy.png"
+    test_img_path = os.path.join(script_dir, test_img_filename)
+
+    try:
+        from PIL import Image
+        img = Image.new('RGB', (120, 80), color = 'blue')
+        img.save(test_img_path)
+        logging.info(f"Created dummy image for testing: {test_img_path}")
+
+        # Run the main function
+        set_wallpaper(test_img_path)
+
+        # Clean up dummy file (optional)
+        # input("Press Enter to remove the dummy image and exit...") # Pause before cleanup
+        # try:
+        #     os.remove(test_img_path)
+        #     logging.info(f"Removed dummy image: {test_img_path}")
+        # except OSError as e:
+        #     logging.error(f"Error removing dummy image: {e}")
+
+    except ImportError:
+        logging.error("Pillow library not installed. Cannot create a dummy image for testing.")
+        logging.info("Please install Pillow ('pip install Pillow') and try again, or test with an existing image path.")
+        # Example with an existing image (replace with a valid path on your system)
+        # existing_image = "/path/to/your/existing/image.jpg"
+        # if os.path.exists(existing_image):
+        #     set_wallpaper(existing_image)
+        # else:
+        #     logging.warning(f"Test image path not found: {existing_image}")
+    except Exception as e:
+        logging.error(f"An error occurred during the test execution: {e}", exc_info=True)
