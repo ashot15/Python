@@ -1,1 +1,347 @@
+import json
+import os
+import sys
+import argparse
+from colorama import init, Fore, Style
 
+# Инициализация colorama для цветного вывода в консоль
+init()
+
+def load_puzzle(file_path):
+    """Загрузка сканворда из JSON-файла"""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        puzzle_data = json.load(f)
+    return puzzle_data
+
+def print_grid(grid, highlight_cells=None):
+    """Вывод сетки сканворда в консоль"""
+    if highlight_cells is None:
+        highlight_cells = set()
+    
+    for y, row in enumerate(grid):
+        row_chars = []
+        for x, char in enumerate(row):
+            if (x, y) in highlight_cells:
+                row_chars.append(Fore.RED + char + Style.RESET_ALL)
+            else:
+                row_chars.append(char)
+        print(' '.join(row_chars))
+
+def get_direction_text(direction):
+    """Получение текстового описания направления"""
+    dx, dy = direction
+    if dx == 1 and dy == 0:
+        return "вправо"
+    elif dx == 0 and dy == 1:
+        return "вниз"
+    elif dx == 1 and dy == 1:
+        return "диагонально вправо-вниз"
+    elif dx == -1 and dy == 1:
+        return "диагонально влево-вниз"
+    else:
+        return f"направление ({dx}, {dy})"
+
+def print_words_info(words_info):
+    """Вывод информации о словах в сканворде"""
+    print("\nСлова в сканворде:")
+    for i, word_info in enumerate(words_info):
+        word = word_info["word"]
+        start = word_info["start"]
+        direction = word_info["direction"]
+        
+        direction_text = get_direction_text(direction)
+        
+        print(f"{i+1}. {word} - начало ({start[0]}, {start[1]}), направление: {direction_text}")
+
+def get_word_cells(word_info):
+    """Получение координат ячеек, образующих слово"""
+    word = word_info["word"]
+    start_x, start_y = word_info["start"]
+    dx, dy = word_info["direction"]
+    
+    cells = set()
+    for i in range(len(word)):
+        x, y = start_x + i * dx, start_y + i * dy
+        cells.add((x, y))
+    
+    return cells
+
+def visualize_word_in_grid(grid_strings, word_info):
+    """Визуализация слова в сетке сканворда"""
+    cells = get_word_cells(word_info)
+    print(f"\nВизуализация слова '{word_info['word']}':")
+    print_grid(grid_strings, cells)
+
+def print_puzzle_stats(puzzle_data):
+    """Вывод статистики по сканворду"""
+    dimensions = puzzle_data["dimensions"]
+    words = puzzle_data["words"]
+    
+    print(f"Размер сканворда: {dimensions['width']}x{dimensions['height']}")
+    print(f"Количество слов: {len(words)}")
+    
+    # Статистика по направлениям
+    directions = {}
+    for word_info in words:
+        direction = tuple(word_info["direction"])
+        directions[direction] = directions.get(direction, 0) + 1
+    
+    print("\nРаспределение слов по направлениям:")
+    for direction, count in directions.items():
+        print(f"  {get_direction_text(direction)}: {count} слов")
+    
+    # Статистика по длине слов
+    word_lengths = {}
+    for word_info in words:
+        length = len(word_info["word"])
+        word_lengths[length] = word_lengths.get(length, 0) + 1
+    
+    print("\nРаспределение слов по длине:")
+    for length in sorted(word_lengths.keys()):
+        print(f"  {length} букв: {word_lengths[length]} слов")
+
+def export_puzzle_as_html(puzzle_data, output_file):
+    """Экспорт сканворда в HTML-формат для удобного просмотра"""
+    grid = puzzle_data["grid"]
+    dimensions = puzzle_data["dimensions"]
+    words = puzzle_data["words"]
+    
+    html = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Сканворд</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+        }}
+        .puzzle-container {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }}
+        .grid {{
+            display: grid;
+            grid-template-columns: repeat({dimensions['width']}, 40px);
+            grid-template-rows: repeat({dimensions['height']}, 40px);
+            gap: 2px;
+            margin-bottom: 20px;
+        }}
+        .cell {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 40px;
+            height: 40px;
+            border: 1px solid #ccc;
+            font-size: 20px;
+            text-align: center;
+        }}
+        .highlight {{
+            background-color: #ffcccc;
+        }}
+        .word-list {{
+            width: 100%;
+            max-width: 600px;
+        }}
+        .word-item {{
+            cursor: pointer;
+            padding: 8px;
+            margin: 4px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }}
+        .word-item:hover {{
+            background-color: #f5f5f5;
+        }}
+    </style>
+</head>
+<body>
+    <div class="puzzle-container">
+        <h1>Сканворд</h1>
+        <div class="grid" id="grid">
+"""
+    
+    # Создаем сетку
+    for y in range(dimensions['height']):
+        for x in range(dimensions['width']):
+            html += f'            <div class="cell" data-x="{x}" data-y="{y}">{grid[y][x]}</div>\n'
+    
+    html += """        </div>
+        
+        <div class="word-list">
+            <h2>Список слов:</h2>
+"""
+    
+    # Создаем список слов
+    for i, word_info in enumerate(words):
+        word = word_info["word"]
+        start = word_info["start"]
+        direction = word_info["direction"]
+        direction_text = get_direction_text(direction)
+        
+        cells_data = []
+        for j in range(len(word)):
+            x = start[0] + j * direction[0]
+            y = start[1] + j * direction[1]
+            cells_data.append(f'{{"x":{x},"y":{y}}}')
+        
+        html += f'            <div class="word-item" data-cells=\'[{",".join(cells_data)}]\'>{i+1}. {word} - начало ({start[0]}, {start[1]}), направление: {direction_text}</div>\n'
+    
+    html += """        </div>
+    </div>
+    
+    <script>
+        document.querySelectorAll('.word-item').forEach(item => {
+            item.addEventListener('mouseover', function() {
+                const cells = JSON.parse(this.getAttribute('data-cells'));
+                cells.forEach(cell => {
+                    const element = document.querySelector(`.cell[data-x="${cell.x}"][data-y="${cell.y}"]`);
+                    if (element) {
+                        element.classList.add('highlight');
+                    }
+                });
+            });
+            
+            item.addEventListener('mouseout', function() {
+                document.querySelectorAll('.cell.highlight').forEach(cell => {
+                    cell.classList.remove('highlight');
+                });
+            });
+        });
+    </script>
+</body>
+</html>"""
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(html)
+    
+    print(f"Сканворд экспортирован в HTML-файл: {output_file}")
+
+def export_all_puzzles_as_html(puzzle_dir):
+    """Экспорт всех сканвордов в HTML-формат"""
+    puzzle_files = [f for f in os.listdir(puzzle_dir) if f.endswith('.json')]
+    
+    if not puzzle_files:
+        print(f"Сканворды не найдены в папке '{puzzle_dir}'.")
+        return
+    
+    print(f"Экспорт {len(puzzle_files)} сканвордов в HTML...")
+    
+    for file in puzzle_files:
+        try:
+            puzzle_file = os.path.join(puzzle_dir, file)
+            puzzle_data = load_puzzle(puzzle_file)
+            
+            html_file = os.path.splitext(puzzle_file)[0] + '.html'
+            export_puzzle_as_html(puzzle_data, html_file)
+        except Exception as e:
+            print(f"Ошибка при экспорте {file}: {e}")
+    
+    print("Экспорт завершен.")
+
+def parse_args():
+    """Парсинг аргументов командной строки"""
+    parser = argparse.ArgumentParser(description='Визуализация сканвордов')
+    
+    parser.add_argument('--puzzle-dir', type=str, default='puzzles',
+                        help='Директория с сканвордами (по умолчанию: puzzles)')
+    
+    parser.add_argument('--export-html', action='store_true',
+                        help='Экспортировать сканворд в HTML-формат')
+    
+    parser.add_argument('--export-all', action='store_true',
+                        help='Экспортировать все сканворды в HTML-формат без интерактивного режима')
+    
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    
+    # Проверка наличия папки с сканвордами
+    if not os.path.exists(args.puzzle_dir):
+        print(f"Папка '{args.puzzle_dir}' не найдена. Сначала сгенерируйте сканворды.")
+        return
+    
+    # Экспорт всех сканвордов и выход, если указан флаг --export-all
+    if args.export_all:
+        export_all_puzzles_as_html(args.puzzle_dir)
+        return
+    
+    # Получение списка файлов с сканвордами
+    puzzle_files = [f for f in os.listdir(args.puzzle_dir) if f.endswith('.json')]
+    
+    if not puzzle_files:
+        print(f"Сканворды не найдены в папке '{args.puzzle_dir}'. Сначала сгенерируйте сканворды.")
+        return
+    
+    # Вывод списка доступных сканвордов
+    print("Доступные сканворды:")
+    for i, file in enumerate(puzzle_files):
+        print(f"{i+1}. {file}")
+    
+    # Выбор сканворда для визуализации
+    choice = -1
+    while choice < 0 or choice >= len(puzzle_files):
+        try:
+            user_input = input("\nВыберите номер сканворда для просмотра (0 для выхода): ")
+            if not user_input.strip():  # Если ввод пустой, выходим
+                return
+                
+            choice = int(user_input) - 1
+            if choice == -1:
+                return
+        except ValueError:
+            print("Введите корректный номер сканворда.")
+        except KeyboardInterrupt:  # Добавляем обработку Ctrl+C
+            print("\nВыход из программы.")
+            return
+    
+    # Загрузка выбранного сканворда
+    puzzle_file = os.path.join(args.puzzle_dir, puzzle_files[choice])
+    puzzle_data = load_puzzle(puzzle_file)
+    
+    # Получение данных сканворда
+    grid = puzzle_data["grid"]
+    words_info = puzzle_data["words"]
+    
+    # Вывод сетки сканворда
+    print("\nСканворд:")
+    print_grid(grid)
+    
+    # Вывод статистики по сканворду
+    print_puzzle_stats(puzzle_data)
+    
+    # Вывод информации о словах
+    print_words_info(words_info)
+    
+    # Экспорт в HTML при необходимости
+    if args.export_html:
+        html_file = os.path.splitext(puzzle_file)[0] + '.html'
+        export_puzzle_as_html(puzzle_data, html_file)
+    
+    # Возможность визуализировать отдельные слова
+    while True:
+        try:
+            user_input = input("\nВведите номер слова для визуализации (0 для выхода): ")
+            if not user_input.strip():  # Если ввод пустой, выходим
+                break
+                
+            word_choice = int(user_input) - 1
+            if word_choice == -1:
+                break
+            if 0 <= word_choice < len(words_info):
+                visualize_word_in_grid(grid, words_info[word_choice])
+            else:
+                print("Введите корректный номер слова.")
+        except ValueError:
+            print("Введите корректный номер слова.")
+        except KeyboardInterrupt:  # Добавляем обработку Ctrl+C
+            print("\nВыход из программы.")
+            break
+
+if __name__ == "__main__":
+    main() 
