@@ -1,0 +1,236 @@
+import random
+import json
+import os
+import argparse
+import re
+
+# Константы для сканворда по умолчанию
+DEFAULT_GRID_WIDTH = 8
+DEFAULT_GRID_HEIGHT = 4
+DEFAULT_MIN_WORDS = 3
+DEFAULT_NUM_PUZZLES = 5
+
+# Направления для размещения слов (горизонтально, вертикально и диагонально)
+DIRECTIONS = [
+    (1, 0),   # вправо
+    (0, 1),   # вниз
+    (1, 1),   # диагонально вправо-вниз
+    (-1, 1),  # диагонально влево-вниз
+]
+
+def is_good_word(word):
+    """Проверка качества слова (только существительные на русском)"""
+    # Проверяем, что слово состоит только из русских букв
+    return bool(re.match(r'^[а-яёА-ЯЁ]+$', word)) and len(word) >= 3
+
+def load_words(filename, min_length=3, max_length=8):
+    """Загрузка слов из файла с фильтрацией по длине и качеству"""
+    words = []
+    with open(filename, 'r', encoding='utf-8') as file:
+        for line in file:
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) > 1:
+                freq, word = parts
+                if min_length <= len(word) <= max_length and is_good_word(word):
+                    words.append(word)
+    return words
+
+def create_empty_grid(width, height):
+    """Создание пустой сетки сканворда"""
+    return [['_' for _ in range(width)] for _ in range(height)]
+
+def check_word_fit(grid, word, x, y, dx, dy):
+    """Проверка, может ли слово быть размещено в сетке, начиная с позиции (x, y) в направлении (dx, dy)"""
+    width, height = len(grid[0]), len(grid)
+    
+    # Проверка, поместится ли слово в сетку
+    if not (0 <= x + (len(word) - 1) * dx < width and 0 <= y + (len(word) - 1) * dy < height):
+        return False
+    
+    # Проверка, не пересекается ли слово с другими словами
+    for i in range(len(word)):
+        curr_x, curr_y = x + i * dx, y + i * dy
+        if grid[curr_y][curr_x] != '_' and grid[curr_y][curr_x] != word[i]:
+            return False
+    
+    return True
+
+def place_word(grid, word, x, y, dx, dy):
+    """Размещение слова в сетке"""
+    for i in range(len(word)):
+        curr_x, curr_y = x + i * dx, y + i * dy
+        grid[curr_y][curr_x] = word[i]
+
+def get_possible_placements(grid, word):
+    """Получение всех возможных размещений слова в сетке"""
+    width, height = len(grid[0]), len(grid)
+    placements = []
+    
+    for y in range(height):
+        for x in range(width):
+            for dx, dy in DIRECTIONS:
+                if check_word_fit(grid, word, x, y, dx, dy):
+                    placements.append((x, y, dx, dy))
+    
+    return placements
+
+def create_word_puzzle(words, width, height, min_words):
+    """Создание сканворда из списка слов"""
+    grid = create_empty_grid(width, height)
+    placed_words = []
+    words_info = []
+    
+    # Перемешиваем слова для случайного выбора
+    random.shuffle(words)
+    
+    # Сначала пробуем разместить как можно больше слов
+    for word in words:
+        # Пропускаем слишком длинные слова
+        if len(word) > max(width, height):
+            continue
+        
+        # Пропускаем слова, которые уже размещены
+        if word in placed_words:
+            continue
+        
+        possible_placements = get_possible_placements(grid, word)
+        if possible_placements:
+            x, y, dx, dy = random.choice(possible_placements)
+            place_word(grid, word, x, y, dx, dy)
+            placed_words.append(word)
+            words_info.append({
+                "word": word,
+                "start": [x, y],
+                "direction": [dx, dy],
+                "length": len(word)
+            })
+    
+    # Проверка минимального количества слов
+    if len(placed_words) < min_words:
+        return None, None
+    
+    # Заполняем оставшиеся пустые ячейки случайными буквами
+    russian_letters = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
+    for y in range(height):
+        for x in range(width):
+            if grid[y][x] == '_':
+                grid[y][x] = random.choice(russian_letters)
+    
+    return grid, words_info
+
+def grid_to_str(grid):
+    """Преобразование сетки в строку для вывода"""
+    return '\n'.join(''.join(row) for row in grid)
+
+def create_json_puzzle(grid, words_info):
+    """Создание JSON-представления сканворда"""
+    grid_str = []
+    for row in grid:
+        grid_str.append(''.join(row))
+    
+    puzzle_data = {
+        "grid": grid_str,
+        "dimensions": {
+            "width": len(grid[0]),
+            "height": len(grid)
+        },
+        "words": words_info
+    }
+    
+    return puzzle_data
+
+def generate_puzzles(words, num_puzzles=5, width=DEFAULT_GRID_WIDTH, height=DEFAULT_GRID_HEIGHT, min_words=DEFAULT_MIN_WORDS):
+    """Генерация нескольких сканвордов"""
+    puzzles = []
+    
+    for i in range(num_puzzles):
+        if not words:  # Если слова закончились, прекращаем генерацию
+            print(f"Слова закончились. Сгенерировано {i} сканвордов.")
+            break
+            
+        grid, words_info = None, None
+        
+        # Пытаемся создать сканворд до тех пор, пока не получится хороший
+        attempts = 0
+        while (grid is None or words_info is None) and attempts < 100:
+            grid, words_info = create_word_puzzle(words, width, height, min_words)
+            attempts += 1
+        
+        if grid and words_info:
+            puzzle_json = create_json_puzzle(grid, words_info)
+            puzzles.append(puzzle_json)
+            
+            # Удаляем использованные слова из списка
+            used_words = [info["word"] for info in words_info]
+            words = [w for w in words if w not in used_words]
+            
+            print(f"Генерация сканворда {i+1}/{num_puzzles} завершена. Осталось {len(words)} слов.")
+        else:
+            print(f"Не удалось сгенерировать сканворд {i+1}/{num_puzzles}.")
+        
+    return puzzles
+
+def parse_args():
+    """Парсинг аргументов командной строки"""
+    parser = argparse.ArgumentParser(description='Генератор сканвордов')
+    
+    parser.add_argument('--width', type=int, default=DEFAULT_GRID_WIDTH,
+                        help=f'Ширина сетки сканворда (по умолчанию: {DEFAULT_GRID_WIDTH})')
+    
+    parser.add_argument('--height', type=int, default=DEFAULT_GRID_HEIGHT,
+                        help=f'Высота сетки сканворда (по умолчанию: {DEFAULT_GRID_HEIGHT})')
+    
+    parser.add_argument('--min-words', type=int, default=DEFAULT_MIN_WORDS,
+                        help=f'Минимальное количество слов в сканворде (по умолчанию: {DEFAULT_MIN_WORDS})')
+    
+    parser.add_argument('--num-puzzles', type=int, default=DEFAULT_NUM_PUZZLES,
+                        help=f'Количество генерируемых сканвордов (по умолчанию: {DEFAULT_NUM_PUZZLES})')
+    
+    parser.add_argument('--word-file', type=str, default='analyz_v2.txt',
+                        help='Файл со списком слов (по умолчанию: analyz_v2.txt)')
+    
+    parser.add_argument('--min-word-length', type=int, default=3,
+                        help='Минимальная длина слова (по умолчанию: 3)')
+    
+    parser.add_argument('--max-word-length', type=int, default=8,
+                        help='Максимальная длина слова (по умолчанию: 8)')
+    
+    return parser.parse_args()
+
+def main():
+    # Получение аргументов командной строки
+    args = parse_args()
+    
+    print(f"Загрузка слов из файла {args.word_file}...")
+    
+    # Загрузка слов из файла
+    words = load_words(args.word_file, args.min_word_length, args.max_word_length)
+    
+    if not words:
+        print(f"Ошибка: в файле {args.word_file} не найдено подходящих слов.")
+        return
+    
+    print(f"Загружено {len(words)} слов подходящей длины.")
+    
+    # Генерация сканвордов
+    print(f"Генерация {args.num_puzzles} сканвордов размером {args.width}x{args.height}...")
+    puzzles = generate_puzzles(words, args.num_puzzles, args.width, args.height, args.min_words)
+    
+    # Создание директории для сохранения результатов
+    if not os.path.exists('puzzles'):
+        os.makedirs('puzzles')
+    
+    # Сохранение сканвордов в файлы
+    print("Сохранение сканвордов...")
+    for i, puzzle in enumerate(puzzles):
+        with open(f'puzzles/puzzle_{i+1}.json', 'w', encoding='utf-8') as f:
+            # Ключи в JSON будут без кавычек
+            json_str = json.dumps(puzzle, ensure_ascii=False, indent=2)
+            # Удаляем все числа из JSON-строки (кроме размеров сетки)
+            clean_json = re.sub(r'(\d+)(?!x\d+)', lambda m: m.group(0), json_str)
+            f.write(clean_json)
+    
+    print(f"Сгенерировано {len(puzzles)} сканвордов и сохранено в папке 'puzzles'")
+
+if __name__ == "__main__":
+    main() 
