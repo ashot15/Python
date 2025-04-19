@@ -1,0 +1,471 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import ttk
+import threading
+import time
+import os
+import sys
+import webbrowser
+import queue
+import math
+
+try:
+    from project_copier import copy_android_project, calculate_line_changes
+except ImportError:
+    messagebox.showerror("Import Error", "Could not import project_copier.py.\nPlease ensure project_copier.py is in the same directory as gui.py.")
+    sys.exit(1)
+
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".android_code_copier")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.txt")
+
+class Application(ttk.Frame):
+    def __init__(self, master=None):
+        super().__init__(master, padding="15")
+        self.master = master
+        master.title("Android Project Code Copier for AI")
+        master.geometry("800x600")
+        master.columnconfigure(0, weight=1)
+        master.rowconfigure(0, weight=1)
+
+        self.grid(column=0, row=0, sticky=(tk.N, tk.W, tk.E, tk.S))
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        self.project_path = tk.StringVar()
+        self.output_file = tk.StringVar()
+        self.auto_copy_interval = tk.IntVar(value=5)
+        self.status_message_queue = queue.Queue()
+
+        self.stop_event = threading.Event()
+        self.auto_copy_thread = None
+        self.auto_copy_running = False
+        self._after_id = None
+
+        self.last_copied_content = {}
+        self.last_copied_file_count = 0
+        self.last_line_changes = 0
+
+        self.create_widgets()
+        self.load_last_paths()
+        self.process_status_queue()
+
+    def create_widgets(self):
+        input_frame = ttk.LabelFrame(self, text="Project Configuration", padding="15")
+        input_frame.grid(column=0, row=0, sticky=(tk.N, tk.W, tk.E, tk.S), pady=5, padx=5)
+        input_frame.columnconfigure(1, weight=1)
+
+        row = 0
+        ttk.Label(input_frame, text="Project Directory:").grid(column=0, row=row, sticky=tk.W, pady=5, padx=5)
+        self.project_entry = ttk.Entry(input_frame, textvariable=self.project_path)
+        self.project_entry.grid(column=1, row=row, sticky=(tk.W, tk.E), pady=5, padx=5)
+        ttk.Button(input_frame, text="Browse...", command=self.browse_project).grid(column=2, row=row, pady=5, padx=5)
+
+        row += 1
+        ttk.Label(input_frame, text="Output File:").grid(column=0, row=row, sticky=tk.W, pady=5, padx=5)
+        self.output_entry = ttk.Entry(input_frame, textvariable=self.output_file)
+        self.output_entry.grid(column=1, row=row, sticky=(tk.W, tk.E), pady=5, padx=5)
+        ttk.Button(input_frame, text="Browse...", command=self.browse_output).grid(column=2, row=row, pady=5, padx=5)
+
+        row += 1
+        ttk.Label(input_frame, text="Auto-Copy Interval (minutes):").grid(column=0, row=row, sticky=tk.W, pady=5, padx=5)
+        self.interval_spinbox = ttk.Spinbox(input_frame, from_=1, to=120, textvariable=self.auto_copy_interval, width=5)
+        self.interval_spinbox.grid(column=1, row=row, sticky=tk.W, pady=5, padx=5)
+
+
+        status_summary_frame = ttk.LabelFrame(self, text="Last Run Summary", padding="10")
+        status_summary_frame.grid(column=0, row=1, sticky=(tk.W, tk.E, tk.N), pady=5, padx=5)
+
+        ttk.Label(status_summary_frame, text="Files Copied:").grid(column=0, row=0, sticky=tk.W, padx=5)
+        self.files_copied_label = ttk.Label(status_summary_frame, text="N/A", foreground="blue")
+        self.files_copied_label.grid(column=1, row=0, sticky=tk.W, padx=5)
+
+        ttk.Label(status_summary_frame, text="Line Changes:").grid(column=2, row=0, sticky=tk.W, padx=20)
+        self.line_changes_label = ttk.Label(status_summary_frame, text="N/A", foreground="blue")
+        self.line_changes_label.grid(column=3, row=0, sticky=tk.W, padx=5)
+
+        actions_log_frame = ttk.LabelFrame(self, text="Actions and Status Log", padding="10")
+        actions_log_frame.grid(column=0, row=2, sticky=(tk.N, tk.W, tk.E, tk.S), pady=5, padx=5)
+        actions_log_frame.columnconfigure(0, weight=1)
+        actions_log_frame.rowconfigure(1, weight=1)
+
+
+        action_buttons_frame = ttk.Frame(actions_log_frame)
+        action_buttons_frame.grid(column=0, row=0, sticky=(tk.W, tk.E), pady=5)
+
+        self.copy_now_button = ttk.Button(action_buttons_frame, text="Copy Project Now", command=self.start_copy_thread)
+        self.copy_now_button.pack(side="left", padx=5)
+
+        self.auto_copy_button = ttk.Button(action_buttons_frame, text=f"Start Auto-Copy ({self.auto_copy_interval.get()} min)", command=self.start_auto_copy)
+        self.auto_copy_button.pack(side="left", padx=5)
+
+        self.stop_auto_copy_button = ttk.Button(action_buttons_frame, text="Stop Auto-Copy", command=self.stop_auto_copy, state=tk.DISABLED)
+        self.stop_auto_copy_button.pack(side="left", padx=5)
+
+        self.open_output_button = ttk.Button(action_buttons_frame, text="Open Output", command=self.open_output_file)
+        self.open_output_button.pack(side="left", padx=5)
+        self.open_output_button.config(state=tk.DISABLED)
+
+        self.log_area = scrolledtext.ScrolledText(actions_log_frame, state='disabled', height=15, wrap=tk.WORD)
+        self.log_area.grid(column=0, row=1, sticky=(tk.N, tk.W, tk.E, tk.S), pady=5, padx=5)
+
+
+    def browse_project(self):
+        directory = filedialog.askdirectory(title="Select Android Project Directory")
+        if directory:
+            self.project_path.set(directory)
+            self.save_last_paths()
+            self.log_message(f"Project directory selected: {directory}")
+
+    def browse_output(self):
+        file = filedialog.asksaveasfilename(defaultextension=".txt",
+                                            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+                                            title="Save Output File As")
+        if file:
+            self.output_file.set(file)
+            self.save_last_paths()
+            self.open_output_button.config(state=tk.NORMAL)
+            self.log_message(f"Output file selected: {file}")
+
+
+    def open_output_file(self):
+        output_file = self.output_file.get()
+        if not output_file:
+            messagebox.showwarning("No Output File", "Please specify an output file first.")
+            self.log_message("Attempted to open output file, but no file was specified.", is_error=True)
+            return
+
+        output_file_abs = os.path.abspath(output_file)
+        output_dir = os.path.dirname(output_file_abs)
+
+        if os.path.exists(output_file_abs):
+            try:
+                self.log_message(f"Attempting to open output file: {output_file_abs}")
+                if sys.platform == "win32":
+                    os.startfile(output_file_abs)
+                elif sys.platform == "darwin":
+                    os.system(f'open "{output_file_abs}"')
+                else:
+                    os.system(f'xdg-open "{output_file_abs}"')
+            except Exception as e:
+                error_msg = f"Could not open {output_file_abs}: {e}"
+                messagebox.showerror("Error Opening File", error_msg)
+                self.log_message(error_msg, is_error=True)
+        elif os.path.exists(output_dir) and output_dir != os.path.dirname(''):
+             try:
+                 self.log_message(f"Output file not found, attempting to open directory: {output_dir}")
+                 if sys.platform == "win32":
+                    os.startfile(output_dir)
+                 elif sys.platform == "darwin":
+                    os.system(f'open "{output_dir}"')
+                 else:
+                    os.system(f'xdg-open "{output_dir}"')
+             except Exception as e:
+                error_msg = f"Output file not found, and could not open its directory {output_dir}: {e}"
+                messagebox.showerror("Error Opening Directory", error_msg)
+                self.log_message(error_msg, is_error=True)
+
+        else:
+             info_msg = f"Output file not found yet:\n{output_file_abs}\nCopy the project first."
+             messagebox.showinfo("File Not Found", info_msg)
+             self.log_message(f"Attempted to open output file, but it does not exist yet: {output_file_abs}", is_error=True)
+
+
+    def log_message(self, message, is_error=False):
+        timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
+        color_tag = "error" if is_error else "normal"
+        self.status_message_queue.put((f"{timestamp} {message}\n", color_tag))
+
+
+    def _append_log(self, message, color_tag):
+         self.log_area.configure(state='normal')
+         self.log_area.insert(tk.END, message, color_tag)
+         if color_tag == "error":
+              self.log_area.tag_configure("error", foreground="red")
+         elif color_tag == "normal":
+              self.log_area.tag_configure("normal", foreground="black")
+
+         self.log_area.configure(state='disabled')
+         self.log_area.see(tk.END)
+
+
+    def process_status_queue(self):
+        try:
+            while True:
+                message, color_tag = self.status_message_queue.get_nowait()
+                self._append_log(message, color_tag)
+                self.status_message_queue.task_done()
+        except queue.Empty:
+            pass
+
+        self._after_id = self.master.after(50, self.process_status_queue)
+
+
+    def start_copy_thread(self):
+        project_dir = self.project_path.get()
+        output_file = self.output_file.get()
+
+        if not project_dir or not os.path.isdir(project_dir):
+            self.log_message("Error: Please select a valid project directory.", is_error=True)
+            messagebox.showwarning("Invalid Input", "Please select a valid project directory.")
+            return
+
+        if not output_file:
+             self.log_message("Error: Please specify an output file.", is_error=True)
+             messagebox.showwarning("Invalid Input", "Please specify an output file.")
+             return
+
+        self.log_message("Starting manual copy...")
+        self.set_button_state(False)
+
+        self.stop_event.clear()
+
+        copy_thread = threading.Thread(target=self.run_copy, args=(project_dir, output_file, self.update_status_callback_for_thread, self.stop_event))
+        copy_thread.daemon = True
+        copy_thread.start()
+
+    def update_status_callback_for_thread(self, message, is_error=False):
+         color_tag = "error" if is_error else "normal"
+         self.status_message_queue.put((message, color_tag))
+
+
+    def run_copy(self, project_dir, output_file, status_cb, stop_ev):
+        old_content_dict = self.last_copied_content
+
+        success, message, new_content_dict = copy_android_project(project_dir, output_file, status_callback=status_cb, stop_event=stop_ev)
+
+        if success and not stop_ev.is_set():
+            self.last_copied_content = new_content_dict
+            self.last_copied_file_count = len(new_content_dict)
+
+            if old_content_dict:
+                 line_changes = calculate_line_changes(old_content_dict, new_content_dict)
+                 self.last_line_changes = line_changes
+                 status_cb(f"Total line changes since last successful copy: {line_changes}")
+            else:
+                 self.last_line_changes = 0
+                 status_cb("This is the first successful copy, cannot calculate line changes since previous run.")
+
+            self.master.after(0, self.files_copied_label.config, {"text": str(self.last_copied_file_count)})
+            self.master.after(0, self.line_changes_label.config, {"text": str(self.last_line_changes)})
+            self.master.after(0, self.open_output_button.config, {"state": tk.NORMAL})
+
+        elif not success and not stop_ev.is_set():
+             status_cb("Copy failed.", is_error=True)
+             self.master.after(0, self.files_copied_label.config, {"text": "Error"})
+             self.master.after(0, self.line_changes_label.config, {"text": "Error"})
+
+        self.master.after(0, self.set_button_state, True, self.auto_copy_running)
+
+        self.save_last_paths()
+
+
+    def start_auto_copy(self):
+        project_dir = self.project_path.get()
+        output_file = self.output_file.get()
+        interval_minutes = self.auto_copy_interval.get()
+
+        if not project_dir or not os.path.isdir(project_dir):
+            self.log_message("Error: Please select a valid project directory.", is_error=True)
+            messagebox.showwarning("Invalid Input", "Please select a valid project directory.")
+            return
+
+        if not output_file:
+             self.log_message("Error: Please specify an output file.", is_error=True)
+             messagebox.showwarning("Invalid Input", "Please specify an output file.")
+             return
+
+        if interval_minutes <= 0:
+             self.log_message(f"Error: Invalid interval {interval_minutes} minutes. Must be positive.", is_error=True)
+             messagebox.showwarning("Invalid Input", "Auto-copy interval must be a positive number of minutes.")
+             return
+
+        if self.auto_copy_running:
+            self.log_message("Auto-copy is already running.")
+            return
+
+        self.stop_event.clear()
+        self.auto_copy_running = True
+        self.set_auto_copy_button_state(True)
+        self.set_button_state(False, True)
+
+        self.log_message(f"Starting auto-copy every {interval_minutes} minutes...")
+        self.auto_copy_button.config(text=f"Auto-Copy ({interval_minutes} min running)")
+
+
+        self.auto_copy_thread = threading.Thread(target=self.auto_copy_loop, args=(project_dir, output_file, interval_minutes, self.update_status_callback_for_thread, self.stop_event))
+        self.auto_copy_thread.daemon = True
+        self.auto_copy_thread.start()
+
+
+    def auto_copy_loop(self, project_dir, output_file, interval_minutes, status_cb, stop_ev):
+        wait_seconds = interval_minutes * 60
+        check_interval_seconds = 1
+
+        while not stop_ev.is_set():
+            status_cb(f"Auto-copy: Running copy at {time.strftime('%Y-%m-%d %H:%M:%S')}...")
+
+            old_content_dict = self.last_copied_content
+
+            copy_success, copy_message, new_content_dict = copy_android_project(project_dir, output_file,
+                                                                                status_callback=lambda msg, is_err=False: status_cb(f"Auto-copy: {msg}", is_err),
+                                                                                stop_event=stop_ev)
+
+            status_cb(f"Auto-copy: {copy_message}", is_error=not copy_success)
+
+            if copy_success and not stop_ev.is_set():
+                self.last_copied_content = new_content_dict
+                self.last_copied_file_count = len(new_content_dict)
+
+                if old_content_dict:
+                     line_changes = calculate_line_changes(old_content_dict, new_content_dict)
+                     self.last_line_changes = line_changes
+                     status_cb(f"Auto-copy: Total line changes since previous run: {line_changes}")
+                else:
+                     self.last_line_changes = 0
+                     status_cb("Auto-copy: This is the first successful copy, cannot calculate line changes since previous run.")
+
+                self.master.after(0, self.files_copied_label.config, {"text": str(self.last_copied_file_count)})
+                self.master.after(0, self.line_changes_label.config, {"text": str(self.last_line_changes)})
+                self.master.after(0, self.open_output_button.config, {"state": tk.NORMAL})
+
+            elif not copy_success and not stop_ev.is_set():
+                 status_cb("Auto-copy: Copy failed.", is_error=True)
+                 self.master.after(0, self.files_copied_label.config, {"text": "Error"})
+                 self.master.after(0, self.line_changes_label.config, {"text": "Error"})
+
+            if stop_ev.is_set():
+                 status_cb("Auto-copy loop stopping after copy.")
+                 break
+
+            status_cb(f"Auto-copy: Waiting {interval_minutes} minutes for next copy...")
+            for i in range(wait_seconds):
+                 if stop_ev.is_set():
+                     status_cb("Auto-copy loop stopping during wait.")
+                     break
+                 time.sleep(check_interval_seconds)
+                 if (i + 1) % 10 == 0 and not stop_ev.is_set():
+                      remaining_time = wait_seconds - (i + 1)
+                      status_cb(f"Auto-copy: Next copy in approx {remaining_time} seconds...")
+            else:
+                 if not stop_ev.is_set():
+                      status_cb(f"Auto-copy: Waiting complete. Preparing for next copy.")
+
+        self.auto_copy_running = False
+        self.master.after(0, self.set_button_state, True, False)
+        self.master.after(0, self.set_auto_copy_button_state, False)
+        status_cb("Auto-copy stopped.")
+        self.master.after(0, self.auto_copy_button.config, {"text": f"Start Auto-Copy ({self.auto_copy_interval.get()} min)"})
+
+
+    def stop_auto_copy(self):
+        if self.auto_copy_running:
+            self.stop_event.set()
+            self.log_message("Stopping auto-copy... Please wait for the current cycle to finish.")
+
+
+    def set_button_state(self, enabled, auto_running=False):
+        entry_state = tk.NORMAL if enabled and not auto_running else tk.DISABLED
+        self.project_entry.config(state=entry_state)
+        self.output_entry.config(state=entry_state)
+        self.interval_spinbox.config(state=entry_state)
+
+        for child in self.winfo_children():
+            if isinstance(child, ttk.LabelFrame) and child.cget("text") == "Project Configuration":
+                 for grandchild in child.winfo_children():
+                      if isinstance(grandchild, ttk.Button) and grandchild['text'].endswith("..."):
+                           grandchild.config(state=entry_state)
+
+        manual_copy_state = tk.DISABLED if not enabled or auto_running else tk.NORMAL
+        self.copy_now_button.config(state=manual_copy_state)
+
+
+    def set_auto_copy_button_state(self, auto_running):
+         if auto_running:
+              self.auto_copy_button.config(state=tk.DISABLED)
+              self.stop_auto_copy_button.config(state=tk.NORMAL)
+              self.auto_copy_button.config(text=f"Auto-Copy ({self.auto_copy_interval.get()} min running)")
+         else:
+              self.auto_copy_button.config(state=tk.NORMAL)
+              self.stop_auto_copy_button.config(state=tk.DISABLED)
+              if self.project_path.get() and self.output_file.get():
+                 self.copy_now_button.config(state=tk.NORMAL)
+              self.auto_copy_button.config(text=f"Start Auto-Copy ({self.auto_copy_interval.get()} min)")
+
+
+    def save_last_paths(self):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        try:
+            with open(CONFIG_FILE, "w") as f:
+                f.write(f"project_path={self.project_path.get()}\n")
+                f.write(f"output_file={self.output_file.get()}\n")
+                f.write(f"interval={self.auto_copy_interval.get()}\n")
+        except Exception as e:
+            print(f"Error saving config: {e}")
+
+    def load_last_paths(self):
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("project_path="):
+                            self.project_path.set(line.split("=", 1)[1])
+                        elif line.startswith("output_file="):
+                            self.output_file.set(line.split("=", 1)[1])
+                        elif line.startswith("interval="):
+                            try:
+                                interval = int(line.split("=", 1)[1])
+                                if 1 <= interval <= 120:
+                                     self.auto_copy_interval.set(interval)
+                                else:
+                                     print(f"Warning: Loaded interval {interval} out of range [1, 120], defaulting to 5.")
+                                     self.auto_copy_interval.set(5)
+                            except ValueError:
+                                print(f"Warning: Could not parse interval from config, defaulting to 5.")
+                                self.auto_copy_interval.set(5)
+
+                self.auto_copy_button.config(text=f"Start Auto-Copy ({self.auto_copy_interval.get()} min)")
+
+                if self.output_file.get():
+                     self.open_output_button.config(state=tk.NORMAL)
+
+            except Exception as e:
+                print(f"Error loading config: {e}")
+
+    def on_closing(self):
+        if self.auto_copy_running:
+            if messagebox.askyesno("Quit", "Auto-copy is running. Stop and quit?"):
+                self.stop_auto_copy()
+                self.master.after(100, self.check_thread_stop_and_quit)
+            else:
+                pass
+        else:
+            if self._after_id:
+                 self.master.after_cancel(self._after_id)
+                 self._after_id = None
+            self.master.destroy()
+
+    def check_thread_stop_and_quit(self):
+        if not self.auto_copy_running:
+            if self._after_id:
+                 self.master.after_cancel(self._after_id)
+                 self._after_id = None
+            self.master.destroy()
+        else:
+            self.master.after(100, self.check_thread_stop_and_quit)
+
+
+def main():
+    root = tk.Tk()
+    try:
+        style = ttk.Style()
+        style.theme_use('clam')
+    except tk.TclError:
+       print("Warning: ttk theme not found, using default style.")
+
+    app = Application(master=root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
