@@ -1,0 +1,237 @@
+import os
+import time
+import traceback
+import difflib
+
+EXCLUDE_DIRS = {
+    '.idea', 'build', 'generated', 'intermediates', 'out',
+    '.git', '.hg', 'venv', '__pycache__',
+    'captures',
+}
+
+EXCLUDE_FILE_NAMES_OR_EXT = {
+    '.iml', '.lock', '.DS_Store', '.gitignore', '.properties', '.json',
+    '.ap_', '.apk', '.aab', '.jar', '.class', '.dex',
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg',
+    '.mp3', '.wav', '.ogg',
+    '.ttf', '.otf', '.woff',
+    '.log', '.tmp',
+    'local.properties',
+    'gradle-wrapper.properties',
+    'kotlin-stdlib-common.jar', 'kotlin-stdlib-jdk7.jar', 'kotlin-stdlib-jdk8.jar',
+    '__init__.py',
+}
+
+INCLUDE_EXTENSIONS = {
+    '.kt', '.gradle', '.java', '.xml', '.gradle', '.groovy', '.pro', '.sh', '.py',
+    '.yaml', '.yml', '.txt', '.md',
+}
+
+INCLUDE_FILE_NAMES = {
+    'AndroidManifest.xml', 'gradlew', 'gradlew.bat', 'settings.gradle',
+    'gradle.properties', 'CMakeLists.txt',
+    'proguard-rules.pro',
+}
+
+PROJECT_START_MARKER = "--- PROJECT_START ---"
+PROJECT_END_MARKER = "--- PROJECT_END ---"
+FILE_START_MARKER_TEMPLATE = "--- FILE_START: {} ---"
+FILE_END_MARKER = "--- FILE_END ---"
+SKIPPED_FILE_MARKER_TEMPLATE = "--- FILE_SKIPPED: {} ({}) ---"
+
+EXCLUDE_DIRS_SET = set(EXCLUDE_DIRS)
+EXCLUDE_FILE_NAMES_OR_EXT_SET = {item.lower() for item in EXCLUDE_FILE_NAMES_OR_EXT}
+INCLUDE_EXTENSIONS_SET = {ext.lower() for ext in INCLUDE_EXTENSIONS}
+INCLUDE_FILE_NAMES_SET = set(INCLUDE_FILE_NAMES)
+
+
+def should_include_file(full_path, project_path):
+    if not os.path.isfile(full_path):
+         return False
+
+    relative_path = os.path.relpath(full_path, project_path)
+    file_name = os.path.basename(relative_path)
+    _, file_ext = os.path.splitext(file_name)
+    file_ext_lower = file_ext.lower()
+    file_name_lower = file_name.lower()
+
+    if file_name in INCLUDE_FILE_NAMES_SET:
+        return True
+
+    if file_ext_lower in INCLUDE_EXTENSIONS_SET:
+        return True
+
+    if file_name_lower in EXCLUDE_FILE_NAMES_OR_EXT_SET or file_ext_lower in EXCLUDE_FILE_NAMES_OR_EXT_SET:
+        return False
+
+    return False
+
+
+def copy_android_project(project_path, output_file_path, status_callback=None, stop_event=None):
+    if not os.path.isdir(project_path):
+        msg = f"Error: Project directory not found at {project_path}"
+        if status_callback:
+            status_callback(msg, is_error=True)
+        return False, msg, {}
+
+    output_dir = os.path.dirname(output_file_path)
+    if output_dir and not os.path.exists(output_dir):
+        try:
+            os.makedirs(output_dir)
+            if status_callback:
+                 status_callback(f"Created output directory: {output_dir}")
+        except OSError as e:
+            msg = f"Error creating output directory {output_dir}: {e}"
+            if status_callback:
+                status_callback(msg, is_error=True)
+            return False, msg, {}
+        except Exception as e:
+            msg = f"An unexpected error occurred creating output directory {output_dir}: {e}"
+            if status_callback:
+                status_callback(msg, is_error=True)
+            return False, msg, {}
+
+    copied_files_content = {}
+    total_files_processed = 0
+
+    try:
+        with open(output_file_path, 'w', encoding='utf-8') as outfile:
+            outfile.write(f"{PROJECT_START_MARKER}\n")
+            outfile.write(f"Project Root: ./\n\n")
+
+            for root, dirs, files in os.walk(project_path, topdown=True):
+                dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS_SET and not d.startswith('.')]
+
+                for file in files:
+                    if stop_event and stop_event.is_set():
+                         msg = "Operation cancelled by user."
+                         if status_callback:
+                             status_callback(msg, is_error=True)
+                         return False, msg, {}
+
+                    full_path = os.path.join(root, file)
+                    relative_path = os.path.relpath(full_path, project_path)
+
+                    if should_include_file(full_path, project_path):
+                        total_files_processed += 1
+                        if total_files_processed % 10 == 1 or total_files_processed < 10:
+                            if status_callback:
+                                status_callback(f"Processing file {total_files_processed}: {relative_path}")
+
+                        try:
+                            with open(full_path, 'r', encoding='utf-8') as infile:
+                                content = infile.read()
+
+                            copied_files_content[relative_path] = content
+
+                            outfile.write(FILE_START_MARKER_TEMPLATE.format(relative_path) + "\n")
+                            outfile.write(content)
+                            outfile.write("\n" + FILE_END_MARKER + "\n\n")
+
+                        except UnicodeDecodeError:
+                            error_msg = f"Skipped (Decoding Error): {relative_path}"
+                            print(f"Warning: {error_msg}")
+                            if status_callback:
+                                status_callback(f"Warning: {error_msg}")
+                            outfile.write(SKIPPED_FILE_MARKER_TEMPLATE.format(relative_path, "Decoding Error") + "\n")
+                            outfile.write("\n" + FILE_END_MARKER + "\n\n")
+
+                        except Exception as e:
+                            error_msg = f"Skipped (Read Error): {relative_path} - {type(e).__name__}"
+                            print(f"Error: {error_msg} - {e}")
+                            traceback.print_exc()
+                            if status_callback:
+                                status_callback(f"Error: {error_msg}", is_error=True)
+                            outfile.write(SKIPPED_FILE_MARKER_TEMPLATE.format(relative_path, f"Read Error: {type(e).__name__}"))
+                            outfile.write("\n" + FILE_END_MARKER + "\n\n")
+
+        msg = f"Project successfully copied to {output_file_path}. Total files processed: {total_files_processed}."
+        if status_callback:
+            status_callback(msg)
+        return True, msg, copied_files_content
+
+    except Exception as e:
+        msg = f"An unexpected error occurred during copying: {e}"
+        print(msg)
+        traceback.print_exc()
+        if status_callback:
+            status_callback(msg, is_error=True)
+        return False, msg, {}
+
+
+def calculate_line_changes(old_content_dict, new_content_dict):
+    total_changes = 0
+    differ = difflib.Differ()
+
+    for relative_path, new_content in new_content_dict.items():
+        old_content = old_content_dict.get(relative_path)
+
+        if old_content is None:
+            total_changes += len(new_content.splitlines())
+        elif old_content != new_content:
+            old_lines = old_content.splitlines()
+            new_lines = new_content.splitlines()
+            diff = list(differ.compare(old_lines, new_lines))
+            changes_in_file = sum(1 for line in diff if line.startswith('+ ') or line.startswith('- '))
+            total_changes += changes_in_file
+
+    for relative_path, old_content in old_content_dict.items():
+        if relative_path not in new_content_dict:
+            total_changes += len(old_content.splitlines())
+
+    return total_changes
+
+if __name__ == "__main__":
+    test_project_path = './temp_android_project_for_test'
+    test_output_file = 'android_project_code.txt'
+
+    def test_status_callback(msg, is_error=False):
+        prefix = "ERROR: " if is_error else ""
+        print(f"Status: {prefix}{msg}")
+
+    if not os.path.exists(test_project_path):
+        print(f"Creating a dummy project at {test_project_path}")
+        os.makedirs(os.path.join(test_project_path, 'app/src/main/java/com/example/app'), exist_ok=True)
+        os.makedirs(os.path.join(test_project_path, 'app/src/main/res/layout'), exist_ok=True)
+        os.makedirs(os.path.join(test_project_path, 'build'), exist_ok=True)
+        os.makedirs(os.path.join(test_project_path, '.idea'), exist_ok=True)
+        os.makedirs(os.path.join(test_project_path, 'docs'), exist_ok=True)
+        os.makedirs(os.path.join(test_project_path, 'assets'), exist_ok=True)
+
+        with open(os.path.join(test_project_path, 'build.gradle'), 'w') as f: f.write("// Top level build.gradle")
+        with open(os.path.join(test_project_path, 'settings.gradle'), 'w') as f: f.write("// settings.gradle\nrootProject.name = 'MyProject'")
+        with open(os.path.join(test_project_path, 'app/build.gradle'), 'w') as f: f.write("// App build.gradle\napply plugin: 'com.android.application'")
+        with open(os.path.join(test_project_path, 'app/src/main/AndroidManifest.xml'), 'w') as f: f.write("<manifest>...</manifest>")
+        with open(os.path.join(test_project_path, 'app/src/main/java/com/example/app/MainActivity.kt'), 'w') as f: f.write("package com.example.app\n\nclass MainActivity {\n  fun onCreate() {}\n}")
+        with open(os.path.join(test_project_path, 'app/src/main/res/layout/activity_main.xml'), 'w') as f: f.write("<layout>\n <TextView/>\n</layout>")
+        with open(os.path.join(test_project_path, 'app/src/main/res/mipmap/ic_launcher.png'), 'wb') as f: f.write(b'\x89PNG\r\n\x1a\n')
+        with open(os.path.join(test_project_path, '.idea/workspace.xml'), 'w') as f: f.write("<xml>...</xml>")
+        with open(os.path.join(test_project_path, 'docs/README.md'), 'w', encoding='utf-8') as f: f.write("# README\n\nProject documentation.")
+        with open(os.path.join(test_project_path, 'local.properties'), 'w') as f: f.write("sdk.dir=/path/to/sdk")
+        with open(os.path.join(test_project_path, 'assets/config.json'), 'w') as f: f.write('{"key": "value"}')
+        with open(os.path.join(test_project_path, 'app/src/main/java/com/example/app/SomeData.json'), 'w') as f: f.write('{"more": "data"}')
+        with open(os.path.join(test_project_path, 'app/proguard-rules.pro'), 'w') as f: f.write("-keep class com.example.** { *; }")
+
+    if os.path.exists(test_project_path):
+        print(f"--- Starting Initial Copy from: {test_project_path} ---")
+        success1, message1, content1 = copy_android_project(test_project_path, test_output_file,
+                                                            status_callback=test_status_callback)
+        print(f"\nResult 1: {message1}")
+        print(f"Files copied: {len(content1)}")
+
+        print("\n--- Simulating changes and running second copy ---")
+        with open(os.path.join(test_project_path, 'app/src/main/java/com/example/app/MainActivity.kt'), 'a') as f:
+            f.write("\n  fun onPause() {}")
+        with open(os.path.join(test_project_path, 'app/src/main/java/com/example/app/Utils.kt'), 'w') as f:
+            f.write("package com.example.app\n\nobject Utils {}")
+
+        success2, message2, content2 = copy_android_project(test_project_path, test_output_file,
+                                                            status_callback=test_status_callback)
+        print(f"\nResult 2: {message2}")
+        print(f"Files copied: {len(content2)}")
+
+        if success1 and success2:
+            line_changes = calculate_line_changes(content1, content2)
+            print(f"\nTotal line changes between copy 1 and copy 2: {line_changes}")
+    else:
+        print(f"Test project path does not exist: {test_project_path}")
